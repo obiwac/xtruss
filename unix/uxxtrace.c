@@ -2827,7 +2827,7 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	{
 	    int pos = 32;
 	    int i = 0;
-	    int n = FETCH16(data, 20);
+	    int n = FETCH16(data, 16);
 	    char buf[64];
 	    for (i = 0; i < n; i++) {
 		sprintf(buf, "windows[%d]", i);
