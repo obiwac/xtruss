@@ -32,6 +32,11 @@
  *    streams of data in protocol packets. (Probably a configurable
  *    limit, like strace -s.)
  *
+ *  - Logging of at least some of the data from the server's welcome
+ *    packet. Might be scope for making some of it optional, but
+ *    certainly things like the root window ids would be useful for
+ *    making sense of the subsequent proceedings.
+ *
  *  - Finish up the few missing pieces in the logging code: strings
  *    of 2-byte characters, the raw binary data used in properties
  *    and images
@@ -106,13 +111,16 @@
  *
  *  - Perhaps now we've got the basic logging code, we might be able
  *    to find completely different ways of acquiring its input other
- *    than by proxying the X server? One obvious option would be to
- *    actually use _strace_ as our back end, and read the protocol
- *    stream out of the traced process's read() and write()
- *    syscalls. Also a FOAF in the pub on 2009-04-23 mentioned that
- *    there might be other ways of attaching to another X client's
- *    data stream, perhaps through some hideous X extension I don't
- *    know about, but he was regrettably short on details.
+ *    than by proxying the X server?
+ *     + One somewhat silly option would be to actually use _strace_
+ * 	 as our back end, and read the protocol stream out of the
+ * 	 traced process's read() and write() syscalls.
+ *     + It looks as if an obvious approach would be the X RECORD
+ * 	 protocol extension, which appears to allow us to attach to
+ * 	 running X clients and retrieve their protocol streams.
+ * 	 (Note that this extension also identifies X client
+ * 	 connections by their resource base, which supports my
+ * 	 thought that it's a good id to use in logging.)
  *
  *  - Find some way of independently testing the correctness of the
  *    vast amount of this program that I translated straight out of
@@ -2879,13 +2887,13 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	break;
       case 26:
 	/* GrabPointer */
-	xlog_param(xl, "status", ENUM | SPECVAL, FETCH32(data, 8),
+	xlog_param(xl, "status", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Success", 0, "AlreadyGrabbed", 1, "InvalidTime", 2,
 		   "NotViewable", 3, "Frozen", 4, (char *)NULL);
 	break;
       case 31:
 	/* GrabKeyboard */
-	xlog_param(xl, "status", ENUM | SPECVAL, FETCH32(data, 8),
+	xlog_param(xl, "status", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Success", 0, "AlreadyGrabbed", 1, "InvalidTime", 2,
 		   "NotViewable", 3, "Frozen", 4, (char *)NULL);
 	break;
