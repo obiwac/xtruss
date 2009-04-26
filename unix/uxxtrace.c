@@ -22,9 +22,6 @@
 /*
  * Definitely TODO:
  *
- *  - Command-line-configurable logging destination, just like
- *    strace -o.
- *
  *  - Command-line-configurable filtering based on request and event
  *    types.
  *
@@ -139,6 +136,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <signal.h>
+#include <string.h>
 
 #include <unistd.h>
 #ifndef HAVE_NO_SYS_SELECT_H
@@ -206,6 +204,11 @@ struct request {
  * the same output channel.
  */
 static struct request *currreq = NULL;
+
+/*
+ * Global variable for the FILE * to which we send our log data.
+ */
+static FILE *xlogfp;
 
 struct xlog {
     int c2sstate, s2cstate;
@@ -318,11 +321,12 @@ void xlog_free(struct xlog *xl)
 void xlog_error(struct xlog *xl, const char *fmt, ...)
 {
     va_list ap;
-    fprintf(stderr, "protocol error: ");
+    fprintf(xlogfp, "protocol error: ");
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(xlogfp, fmt, ap);
     va_end(ap);
-    fprintf(stderr, "\n");
+    fprintf(xlogfp, "\n");
+    fflush(xlogfp);
     xl->error = TRUE;
 }
 
@@ -726,7 +730,8 @@ void xlog_new_line(void)
     if (currreq) {
 	/* FIXME: in some modes we might wish to print the sequence number
 	 * here, which would be easy of course */
-	fprintf(stderr, " = <unfinished>\n");
+	fprintf(xlogfp, " = <unfinished>\n");
+	fflush(xlogfp);
 	currreq = NULL;
     }
 }
@@ -749,11 +754,12 @@ void xlog_request_done(struct xlog *xl, struct request *req)
 
     xlog_new_line();
     if (req->replies) {
-	fprintf(stderr, "%s", req->text);
+	fprintf(xlogfp, "%s", req->text);
 	currreq = req;
     } else {
-	fprintf(stderr, "%s\n", req->text);
+	fprintf(xlogfp, "%s\n", req->text);
     }
+    fflush(xlogfp);
 }
 
 /* Indicate that we're about to print a response to a particular request */
@@ -761,16 +767,17 @@ void xlog_respond_to(struct request *req)
 {
     if (currreq != req) {
 	xlog_new_line();
-	fprintf(stderr, " ... %s = ", req->text);
+	fprintf(xlogfp, " ... %s = ", req->text);
     } else {
-	fprintf(stderr, " = ");
+	fprintf(xlogfp, " = ");
     }
 }
 
 void xlog_response_done(const char *text)
 {
-    fprintf(stderr, "%s\n", text);
+    fprintf(xlogfp, "%s\n", text);
     currreq = NULL;
+    fflush(xlogfp);
 }
 
 void xlog_rectangle(struct xlog *xl, const unsigned char *data,
@@ -2775,8 +2782,9 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 
     if (data && !req) {
 	xlog_new_line();
-	fprintf(stderr, "--- reply received for unknown request sequence"
+	fprintf(xlogfp, "--- reply received for unknown request sequence"
 		" number %lu\n", (unsigned long)FETCH16(data, 4));
+	fflush(xlogfp);
 	return;
     }
 
@@ -3530,7 +3538,8 @@ void xlog_do_event(struct xlog *xl, const void *vdata, int len)
     xlog_event(xl, data, len, 0);
 
     xlog_new_line();
-    fprintf(stderr, "--- %s\n", xl->textbuf);
+    fprintf(xlogfp, "--- %s\n", xl->textbuf);
+    fflush(xlogfp);
 }
 
 void xlog_c2s(struct xlog *xl, const void *vdata, int len)
@@ -3961,10 +3970,12 @@ int main(int argc, char **argv)
     int fd;
     int i, fdcount, fdsize, fdstate;
     long now;
+    char *logfile = NULL;
     char **cmd = NULL;
     int displaynum;
     char hostname[1024];
-    pid_t pid; 
+    pid_t pid;
+    int doing_opts = TRUE;
 
     fdlist = NULL;
     fdcount = fdsize = 0;
@@ -3974,7 +3985,42 @@ int main(int argc, char **argv)
     while (--argc > 0) {
 	char *p = *++argv;
 
-	if (*p == '-') {
+	if (doing_opts && *p == '-') {
+	    if (p[1] == '-') {
+		if (!p[2])	       /* "--" terminates option parsing */
+		    doing_opts = FALSE;
+		else {
+		    /* no GNU-style long options currently supported */
+		    fprintf(stderr, "xtrace: unknown option '%s'\n", p);
+		    return 1;
+		}
+	    }
+	    p++;
+	    while (*p) {
+		int c = *p++;
+		char *val;
+
+		switch (c) {
+		  case 'o':
+		    /* options requiring an argument */
+		    if (*p)
+			val = p;
+		    else if (--argc > 0)
+			val = *++argv;
+		    else {
+			fprintf(stderr, "xtrace: option '-%c' expects an"
+				" argument\n", c);
+			return 1;
+		    }
+		    switch (c) {
+		      case 'o':
+			logfile = val;
+			break;
+		    }
+		    break;
+		    /* now options not requiring an argument */
+		}
+	    }
 	    /* No command-line options yet supported */
 	    /* Configure mindisplaynum */
 	    /* Configure proxy-side auth */
@@ -4002,6 +4048,16 @@ int main(int argc, char **argv)
     hostname[lenof(hostname)-1] = '\0';
 
     /* FIXME: do we need to initialise more of cfg? */
+
+    if (logfile) {
+	xlogfp = fopen(logfile, "w");
+	if (!xlogfp) {
+	    fprintf(stderr, "xtrace: open(\"%s\"): %s\n", logfile,
+		    strerror(errno));
+	    return 1;
+	}
+    } else
+	xlogfp = stderr;
 
     signal(SIGCHLD, sigchld);
     displaynum = start_xproxy(&cfg, 10);
@@ -4147,6 +4203,8 @@ int main(int argc, char **argv)
 	if (ret < 0) {
 	    perror("select");
 	    fflush(NULL);
+	    if (logfile)
+		fclose(xlogfp);
 	    exit(1);
 	}
 
