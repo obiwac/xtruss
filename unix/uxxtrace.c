@@ -34,9 +34,9 @@
  *    certainly things like the root window ids would be useful for
  *    making sense of the subsequent proceedings.
  *
- *  - Finish up the few missing pieces in the logging code: strings
- *    of 2-byte characters, the raw binary data used in properties
- *    and images
+ *  - Figure out how to log the image data in PutImage requests and
+ *    GetImage replies (the protocol spec isn't entirely clear how
+ *    it should be interpreted).
  *
  *  - Deal with interleaving log data from multiple clients:
  *     * identify clients by some sort of numeric id (resource-base
@@ -65,6 +65,10 @@
  *    out into a subfunction find_request_for_sequence_number() and
  *    have that called as appropriate from all of xlog_do_reply,
  *    xlog_do_event and xlog_do_error.
+ *
+ *  - --help, --version, --licence. (Sort out the licence, actually.
+ *    Probably not _everybody_ in the PuTTY LICENCE document holds
+ *    copyright in the pieces I've reused here.)
  *
  * Possibly TODO:
  *
@@ -459,6 +463,8 @@ enum {
     ENUM,
     STRING,
     HEXSTRING,
+    HEXSTRING2,
+    HEXSTRING4,
     SETBEGIN,
     NOTHING,
     SPECVAL = 0x8000
@@ -467,7 +473,7 @@ enum {
 void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 {
     va_list ap;
-    const char *sval;
+    const char *sval, *sep;
     int ival, ival2;
 
     if (xl->reqlogstate == 0) {
@@ -498,6 +504,28 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 	    sval = va_arg(ap, const char *);
 	    while (ival-- > 0)
 		xlog_printf(xl, "%02X", (unsigned char)(*sval++));
+	    break;
+	  case HEXSTRING2:
+	    ival = va_arg(ap, int);
+	    sval = va_arg(ap, const char *);
+	    sep = "";
+	    while (ival-- > 0) {
+		unsigned val = READ16(sval);
+		xlog_printf(xl, "%s%04X", sep, val);
+		sval += 2;
+		sep = ":";
+	    }
+	    break;
+	  case HEXSTRING4:
+	    ival = va_arg(ap, int);
+	    sval = va_arg(ap, const char *);
+	    sep = "";
+	    while (ival-- > 0) {
+		unsigned val = READ32(sval);
+		xlog_printf(xl, "%s%08X", sep, val);
+		sval += 4;
+		sep = ":";
+	    }
 	    break;
 	  case SETBEGIN:
 	    /*
@@ -1155,7 +1183,7 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "type", ATOM, FETCH32(data, pos+8));
 	xlog_param(xl, "format", DECU, FETCH8(data, pos+1));
-	/* FIXME: more data here to be logged */
+	xlog_param(xl, "data", HEXSTRING, 20, STRING(data, pos+12, 20));
 	xlog_printf(xl, ")");
 	break;
       case 34:
@@ -1446,9 +1474,23 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Replace", 0, "Prepend", 1, "Append", 2,
 		   (char *)NULL);
-	xlog_param(xl, "length", DECU, FETCH32(data, 20));
-	/* FIXME: then there's an arbitrary amount of data which will want
-	 * to be logged too, probably instead of length */
+	switch (FETCH8(data, 16)) {
+	  case 8:
+	    xlog_param(xl, "data", STRING, FETCH32(data, 20),
+		       STRING(data, 24, FETCH32(data, 20)));
+	    break;
+	  case 16:
+	    xlog_param(xl, "data", HEXSTRING2, FETCH32(data, 20),
+		       STRING(data, 24, 2*FETCH32(data, 20)));
+	    break;
+	  case 32:
+	    xlog_param(xl, "data", HEXSTRING4, FETCH32(data, 20),
+		       STRING(data, 24, 4*FETCH32(data, 20)));
+	    break;
+	  default:
+	    xlog_printf(xl, "<unknown format of data>");
+	    break;
+	}
 	break;
       case 19:
 	xlog_request_name(xl, "DeleteProperty");
@@ -1709,14 +1751,16 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
       case 48:
 	xlog_request_name(xl, "QueryTextExtents");
 	xlog_param(xl, "font", FONTABLE, FETCH32(data, 4));
-	/*
-	 * FIXME: a nasty string parameter here. Partly the reason
-	 * it's nasty is that it starts from data+8 and goes on to
-	 * the end of the packet (i.e. it's the first packet type
-	 * I've seen so far in which the length field is critical to
-	 * the semantics); but mostly, it's a STRING16 and I'm not
-	 * sure how best to print those yet.
-	 */
+	{
+	    int stringlen = len - 8;
+	    stringlen /= 2;
+	    if (FETCH8(data, 1) != 0)
+		stringlen--;
+	    if (stringlen < 0)
+		stringlen = 0;
+	    xlog_param(xl, "string", HEXSTRING2, stringlen,
+		       STRING(data, 8, 2*stringlen));
+	}
 	req->replies = 1;
 	break;
       case 49:
@@ -2195,7 +2239,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "format", ENUM | SPECVAL,
 		   FETCH8(data, 1), "Bitmap", 0, "XYPixmap", 1,
 		   "ZPixmap", 2, (char *)NULL);
-	/* FIXME: terminal chunk of image data */
+	/* FIXME: the actual image data is not currently logged */
 	break;
       case 73:
 	xlog_request_name(xl, "GetImage");
@@ -2325,8 +2369,8 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		} else {
 		    xlog_param(xl, "delta", DEC8,
 			       FETCH8(data, pos+1));
-		    /* FIXME: decide how to display 2-byte strings */
-		    xlog_param(xl, "string", STRING, 5, "FIXME");
+		    xlog_param(xl, "string", HEXSTRING2, tilen,
+			       STRING(data, pos+2, 2*tilen));
 		    pos += 2*tilen + 2;
 		}
 
@@ -2350,8 +2394,8 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 14));
-	/* FIXME: decide how to display 2-byte strings */
-	xlog_param(xl, "string", STRING, 5, "FIXME");
+	xlog_param(xl, "string", HEXSTRING2, FETCH8(data, 1),
+		   STRING(data, 16, 2*FETCH8(data, 1)));
 	break;
       case 78:
 	xlog_request_name(xl, "CreateColormap");
@@ -2906,8 +2950,23 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "type", ATOM, FETCH32(data, 8));
 	xlog_param(xl, "format", DECU, FETCH8(data, 1));
 	xlog_param(xl, "bytes-after", DECU, FETCH32(data, 12));
-	xlog_param(xl, "length", DECU, FETCH32(data, 16));
-	/* FIXME: log the raw data in place of length */
+	switch (FETCH8(data, 1)) {
+	  case 8:
+	    xlog_param(xl, "data", STRING, FETCH32(data, 16),
+		       STRING(data, 32, FETCH32(data, 16)));
+	    break;
+	  case 16:
+	    xlog_param(xl, "data", HEXSTRING2, FETCH32(data, 16),
+		       STRING(data, 32, 2*FETCH32(data, 16)));
+	    break;
+	  case 32:
+	    xlog_param(xl, "data", HEXSTRING4, FETCH32(data, 16),
+		       STRING(data, 32, 4*FETCH32(data, 16)));
+	    break;
+	  default:
+	    xlog_printf(xl, "<unknown format of data>");
+	    break;
+	}
 	break;
       case 21:
 	/* ListProperties */
@@ -3131,7 +3190,7 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "depth", DECU, FETCH8(data, 1));
 	xlog_param(xl, "visual", VISUALID | SPECVAL, FETCH32(data, 8),
 		   "None", 0, (char *)NULL);
-	/* FIXME: arbitrary image data left to be dumped */
+	/* FIXME: the actual image data is not currently logged */
 	break;
       case 83:
 	/* ListInstalledColormaps */
