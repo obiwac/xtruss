@@ -1,16 +1,22 @@
 /*
- * Main program for an X11 proxy, based on the PuTTY general network
- * abstraction and X forwarding framework, which will hopefully do X
- * protocol decoding on the proxied connections and report the
- * series of protocol transactions in a way more similar to 'strace'
- * than 'xmon'.
+ * xtrace: looks like strace, quacks like xmon.
  *
- * (More importantly, unlike xmon, this program should automatically
- * do the Right Thing with regard to authorisation: like SSH X
- * forwarding, it should invent its own auth details for its proxy X
- * server and substitute the right ones for the real server. So you
- * simply run 'xtrace command args' and it should Just Work, with no
- * setup hassle.)
+ * This is essentially a logging X11 proxy. It's based on the PuTTY
+ * general network abstraction and X forwarding framework, so it
+ * reuses PuTTY's code for replacing the X authorisation data at the
+ * start of a forwarded connection. The effect of this is that it
+ * can set up its proxy server with its own authorisation data, and
+ * pass that to its client without being fundamentally unable to
+ * handle complex authorisation methods that don't survive proxying
+ * (e.g. XDM-AUTHORIZATION-1). Practical upshot: instead of having
+ * to run the logging proxy in one terminal, set its authorisation
+ * up painstakingly and then launch the program to be monitored with
+ * carefully chosen environment variables, you just run 'xtrace
+ * <program> <args>' in exactly the same way you would with strace,
+ * and it Just Works.
+ *
+ * Additionally, the output is more like strace's format than
+ * xmon's, which I for one find makes it much easier to read.
  */
 
 /*
@@ -376,14 +382,11 @@ static void print_c_string(struct xlog *xl, const char *data, int len)
     }
 }
 
-static void writemask(struct xlog *xl, int ival, ...)
+static void writemaskv(struct xlog *xl, int ival, va_list ap)
 {
     const char *sep = "";
     const char *svname;
     int svi;
-    va_list ap;
-
-    va_start(ap, ival);
 
     while (1) {
 	svname = va_arg(ap, const char *);
@@ -397,10 +400,16 @@ static void writemask(struct xlog *xl, int ival, ...)
 	}
     }
 
-    va_end(ap);
-
     if (!*sep)
 	xlog_text(xl, "0");	       /* special case: no flags set */
+}
+
+static void writemask(struct xlog *xl, int ival, ...)
+{
+    va_list ap;
+    va_start(ap, ival);
+    writemaskv(xl, ival, ap);
+    va_end(ap);
 }
 
 void xlog_request_name(struct xlog *xl, const char *buf)
@@ -442,7 +451,7 @@ enum {
     ATOM,
     EVENTMASK,
     KEYMASK,
-    CONFREQMASK, /* used in ConfigureRequest event only */
+    GENMASK,
     ENUM,
     STRING,
     HEXSTRING,
@@ -671,16 +680,8 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 			  "Button5", 0x1000,
 			  (char *)NULL);
 		break;
-	      case CONFREQMASK:
-		writemask(xl, ival,
-			  "x", 0x0001,
-			  "y", 0x0002,
-			  "width", 0x0004,
-			  "height", 0x0008,
-			  "border-width", 0x0010,
-			  "sibling", 0x0020,
-			  "stack-mode", 0x0040,
-			  (char *)NULL);
+	      case GENMASK:
+		writemaskv(xl, ival, ap);
 		break;
 	      case ATOM:
 		/*
@@ -1051,7 +1052,15 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	 * which of the fields have just been changed, and which are
 	 * unchanged and merely being re-reported as a courtesy.
 	 */
-	xlog_param(xl, "value-mask", CONFREQMASK, FETCH16(data, pos+26));
+	xlog_param(xl, "value-mask", GENMASK, FETCH16(data, pos+26),
+		   "x", 0x0001,
+		   "y", 0x0002,
+		   "width", 0x0004,
+		   "height", 0x0008,
+		   "border-width", 0x0010,
+		   "sibling", 0x0020,
+		   "stack-mode", 0x0040,
+		   (char *)NULL);
 	xlog_printf(xl, ")");
 	break;
       case 24:
@@ -1754,7 +1763,6 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	break;
       case 55:
       case 56:
-      case 57:
 	{
 	    unsigned i, bitmask;
 
@@ -1765,16 +1773,10 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 8));
 		i = 16;
 		break;
-	      case 56:
+	      default /* case 56 */:
 		xlog_request_name(xl, "ChangeGC");
 		xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
 		i = 12;
-		break;
-	      default /* case 57 */:
-		xlog_request_name(xl, "CopyGC");
-		xlog_param(xl, "src-gc", GCONTEXT, FETCH32(data, 4));
-		xlog_param(xl, "dst-gc", GCONTEXT, FETCH32(data, 8));
-		i = 16;
 		break;
 	    }
 
@@ -1913,6 +1915,36 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		i += 4;
 	    }
 	}
+	break;
+      case 57:
+	xlog_request_name(xl, "CopyGC");
+	xlog_param(xl, "src-gc", GCONTEXT, FETCH32(data, 4));
+	xlog_param(xl, "dst-gc", GCONTEXT, FETCH32(data, 8));
+	xlog_param(xl, "value-mask", GENMASK, FETCH32(data, 12),
+		   "function", 0x00000001,
+		   "plane-mask", 0x00000002,
+		   "foreground", 0x00000004,
+		   "background", 0x00000008,
+		   "line-width", 0x00000010,
+		   "line-style", 0x00000020,
+		   "cap-style", 0x00000040,
+		   "join-style", 0x00000080,
+		   "fill-style", 0x00000100,
+		   "fill-rule", 0x00000200,
+		   "tile", 0x00000400,
+		   "stipple", 0x00000800,
+		   "tile-stipple-x-origin", 0x00001000,
+		   "tile-stipple-y-origin", 0x00002000,
+		   "font", 0x00004000,
+		   "subwindow-mode", 0x00008000,
+		   "graphics-exposures", 0x00010000,
+		   "clip-x-origin", 0x00020000,
+		   "clip-y-origin", 0x00040000,
+		   "clip-mask", 0x00080000,
+		   "dash-offset", 0x00100000,
+		   "dashes", 0x00200000,
+		   "arc-mode", 0x00400000,
+		   (char *)NULL);
 	break;
       case 58:
 	xlog_request_name(xl, "SetDashes");
