@@ -22,6 +22,9 @@
 /*
  * Definitely TODO:
  *
+ *  - Finish up the X RECORD stuff, by polishing its error handling
+ *    and finishing the interactive window selection code.
+ *
  *  - Command-line-configurable filtering based on request and event
  *    types.
  *
@@ -117,19 +120,6 @@
  *    (-t, -tt, -ttt), alignment (-a), and more filtering options
  *    (-e).
  *
- *  - Perhaps now we've got the basic logging code, we might be able
- *    to find completely different ways of acquiring its input other
- *    than by proxying the X server?
- *     + One somewhat silly option would be to actually use _strace_
- * 	 as our back end, and read the protocol stream out of the
- * 	 traced process's read() and write() syscalls.
- *     + It looks as if an obvious approach would be the X RECORD
- * 	 protocol extension, which appears to allow us to attach to
- * 	 running X clients and retrieve their protocol streams.
- * 	 (Note that this extension also identifies X client
- * 	 connections by their resource base, which supports my
- * 	 thought that it's a good id to use in logging.)
- *
  *  - Find some way of independently testing the correctness of the
  *    vast amount of this program that I translated straight out of
  *    the X protocol specs...
@@ -141,6 +131,7 @@
 #include <assert.h>
 #include <signal.h>
 #include <string.h>
+#include <ctype.h>
 
 #include <unistd.h>
 #ifndef HAVE_NO_SYS_SELECT_H
@@ -226,10 +217,11 @@ struct xlog {
     int reqlogstate;
     int overflow;
     int nextseq;
+    int type;
     struct request *rhead, *rtail;
 };
 
-struct xlog *xlog_new(void)
+struct xlog *xlog_new(int type)
 {
     struct xlog *xl = snew(struct xlog);
     xl->endianness = -1;	       /* as-yet-unknown */
@@ -243,7 +235,8 @@ struct xlog *xlog_new(void)
     xl->textbuf = NULL;
     xl->textbuflen = xl->textbufsize = 0;
     xl->rhead = xl->rtail = NULL;
-    xl->nextseq = 1;
+    xl->nextseq = 0;
+    xl->type = type;
     return xl;
 }
 
@@ -274,7 +267,7 @@ void xlog_free(struct xlog *xl)
   case __LINE__:; \
 } while (0)
 
-#define ensure(prefix, esize) do { \
+#define ensure(xl, prefix, esize) do { \
     int xlNewSize = (esize); \
     if (xl->prefix ## size < xlNewSize) { \
 	xl->prefix ## size = xlNewSize * 5 / 4 + 1024; \
@@ -282,7 +275,7 @@ void xlog_free(struct xlog *xl)
 				    xl->prefix ## size, unsigned char); \
     } \
 } while (0)
-#define readfrom(prefix, size, start) do { \
+#define readfrom(xl, prefix, size, start) do { \
     xl->prefix ## len = (start); \
     xl->prefix ## limit = (size) - xl->prefix ## len; \
     while (xl->prefix ## limit > 0) { \
@@ -290,7 +283,7 @@ void xlog_free(struct xlog *xl)
 	{ \
 	    int clen = (len < xl->prefix ## limit ? \
 			len : xl->prefix ## limit); \
-	    ensure(prefix, xl->prefix ## len + clen); \
+	    ensure(xl, prefix, xl->prefix ## len + clen); \
 	    memcpy(xl->prefix ## buf + xl->prefix ## len, data, clen); \
 	    xl->prefix ## limit -= clen; \
 	    xl->prefix ## len += clen; \
@@ -299,8 +292,8 @@ void xlog_free(struct xlog *xl)
 	} \
     } \
 } while (0)
-#define read(prefix, size) readfrom(prefix, size, 0)
-#define ignore(prefix, size) do { \
+#define read(xl, prefix, size) readfrom(xl, prefix, size, 0)
+#define ignore(xl, prefix, size) do { \
     xl->prefix ## limit = (size); \
     xl->prefix ## len = 0; \
     while (xl->prefix ## limit > 0) { \
@@ -2947,25 +2940,28 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	break;
       case 20:
 	/* GetProperty */
-	xlog_param(xl, "type", ATOM, FETCH32(data, 8));
-	xlog_param(xl, "format", DECU, FETCH8(data, 1));
-	xlog_param(xl, "bytes-after", DECU, FETCH32(data, 12));
-	switch (FETCH8(data, 1)) {
-	  case 8:
-	    xlog_param(xl, "data", STRING, FETCH32(data, 16),
-		       STRING(data, 32, FETCH32(data, 16)));
-	    break;
-	  case 16:
-	    xlog_param(xl, "data", HEXSTRING2, FETCH32(data, 16),
-		       STRING(data, 32, 2*FETCH32(data, 16)));
-	    break;
-	  case 32:
-	    xlog_param(xl, "data", HEXSTRING4, FETCH32(data, 16),
-		       STRING(data, 32, 4*FETCH32(data, 16)));
-	    break;
-	  default:
-	    xlog_printf(xl, "<unknown format of data>");
-	    break;
+	xlog_param(xl, "type", ATOM | SPECVAL, FETCH32(data, 8),
+		   "None", 0, (char *)NULL);
+	if (FETCH32(data, 8) != 0) {
+	    xlog_param(xl, "format", DECU, FETCH8(data, 1));
+	    xlog_param(xl, "bytes-after", DECU, FETCH32(data, 12));
+	    switch (FETCH8(data, 1)) {
+	      case 8:
+		xlog_param(xl, "data", STRING, FETCH32(data, 16),
+			   STRING(data, 32, FETCH32(data, 16)));
+		break;
+	      case 16:
+		xlog_param(xl, "data", HEXSTRING2, FETCH32(data, 16),
+			   STRING(data, 32, 2*FETCH32(data, 16)));
+		break;
+	      case 32:
+		xlog_param(xl, "data", HEXSTRING4, FETCH32(data, 16),
+			   STRING(data, 32, 4*FETCH32(data, 16)));
+		break;
+	      default:
+		xlog_printf(xl, "<unknown format of data>");
+		break;
+	    }
 	}
 	break;
       case 21:
@@ -3616,44 +3612,46 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
 
     crBegin(xl->c2sstate);
 
-    /*
-     * Endianness byte and subsequent padding byte.
-     */
-    read(c2s, 1);
-    if (xl->c2sbuf[0] == 'l' || xl->c2sbuf[0] == 'B') {
-	xl->endianness = xl->c2sbuf[0];
-    } else {
-	err((xl, "initial endianness byte (0x%02X) unrecognised", *data));
-    }
-    ignore(c2s, 1);
+    if (xl->type == 0) {
+	/*
+	 * Endianness byte and subsequent padding byte.
+	 */
+	read(xl, c2s, 1);
+	if (xl->c2sbuf[0] == 'l' || xl->c2sbuf[0] == 'B') {
+	    xl->endianness = xl->c2sbuf[0];
+	} else {
+	    err((xl, "initial endianness byte (0x%02X) unrecognised", *data));
+	}
+	ignore(xl, c2s, 1);
 
-    /*
-     * Protocol major and minor version, and authorisation detail
-     * string lengths.
-     *
-     * We only log the protocol version if it doesn't match our
-     * expectations; we definitely don't want to log the auth data,
-     * both for security reasons and because we're meddling with
-     * them ourselves in any case.
-     */
-    read(c2s, 8);
-    if ((i = READ16(xl->c2sbuf)) != 11)
-	err((xl, "major protocol version (0x%04X) unrecognised", i));
-    if ((i = READ16(xl->c2sbuf + 2)) != 0)
-	warn((xl, "minor protocol version (0x%04X) unrecognised", i));
-    i = READ16(xl->c2sbuf + 4);
-    i = (i + 3) &~ 3;
-    i += READ16(xl->c2sbuf + 6);
-    i = (i + 3) &~ 3;
-    ignore(c2s, 2 + i);
+	/*
+	 * Protocol major and minor version, and authorisation
+	 * detail string lengths.
+	 *
+	 * We only log the protocol version if it doesn't match our
+	 * expectations; we definitely don't want to log the auth
+	 * data, both for security reasons and because we're
+	 * meddling with them ourselves in any case.
+	 */
+	read(xl, c2s, 8);
+	if ((i = READ16(xl->c2sbuf)) != 11)
+	    err((xl, "major protocol version (0x%04X) unrecognised", i));
+	if ((i = READ16(xl->c2sbuf + 2)) != 0)
+	    warn((xl, "minor protocol version (0x%04X) unrecognised", i));
+	i = READ16(xl->c2sbuf + 4);
+	i = (i + 3) &~ 3;
+	i += READ16(xl->c2sbuf + 6);
+	i = (i + 3) &~ 3;
+	ignore(xl, c2s, 2 + i);
+    }
 
     /*
      * Now we expect a steady stream of X requests.
      */
     while (1) {
-	read(c2s, 4);
+	read(xl, c2s, 4);
 	i = READ16(xl->c2sbuf + 2);
-	readfrom(c2s, i*4, 4);
+	readfrom(xl, c2s, i*4, 4);
 	xlog_do_request(xl, xl->c2sbuf, xl->c2slen);
     }
 
@@ -3675,59 +3673,62 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 
     crBegin(xl->s2cstate);
 
-    /*
-     * Initial phase of data coming from the server is expected to
-     * be composed of packets with an 8-byte header whose final two
-     * bytes give the number of 4-byte words beyond that header.
-     */
-    while (1) {
-	read(s2c, 8);
-	if (xl->endianness == -1)
-	    err((xl, "server reply received before client sent endianness"));
-
-	i = READ16(xl->s2cbuf + 6);
-	readfrom(s2c, 8+i*4, 8);
-
+    if (xl->type == 0) {
 	/*
-	 * The byte at the front of one of these packets is 0 for a
-	 * failed authorisation, 1 for a successful authorisation,
-	 * and 2 for an incomplete authorisation indicating more
-	 * data should be sent.
-	 *
-	 * Since we proxy the X authorisation ourselves and have a
-	 * fixed set of protocols we understand of which we know
-	 * none involve type-2 packets, we never expect to see one.
-	 * 0 is also grounds for ceasing to log the connection; that
-	 * leaves 1, which terminates this loop and we move on to
-	 * the main phase of the protocol.
-	 *
-	 * (We might some day need to extend this code so that a
-	 * type-2 packet is processed and we look for another packet
-	 * of this type, which is why I've written this as a while
-	 * loop with an unconditional break at the end instead of
-	 * simple straight-through code. We would only need to stick
-	 * a 'continue' at the end of handling a type-2 packet to
-	 * make this change.)
+	 * Initial phase of data coming from the server is expected
+	 * to be composed of packets with an 8-byte header whose
+	 * final two bytes give the number of 4-byte words beyond
+	 * that header.
 	 */
-	if (xl->s2cbuf[0] == 0)
-	    err((xl, "server refused authorisation, reason \"%.*s\"",
-		 xl->s2cbuf + 8, min(xl->s2clen-8, xl->s2cbuf[1])));
-	else if (xl->s2cbuf[0] == 2)
-	    err((xl, "server sent incomplete-authorisation packet, which"
-		 " is unsupported by xtrace"));
-	else if (xl->s2cbuf[0] != 1)
-	    err((xl, "server sent unrecognised authorisation-time opcode %d",
-		 xl->s2cbuf[0]));
+	while (1) {
+	    read(xl, s2c, 8);
+	    if (xl->endianness == -1)
+		err((xl, "server reply received before client sent endianness"));
 
-	/*
-	 * Now we're sitting on a successful authorisation packet.
-	 * FIXME: we might usefully log some of its contents, though
-	 * probably optionally. Even if we don't, we could at least
-	 * save some resource ids - windows, colormaps, visuals and
-	 * so on - to lend context to logging of later requests
-	 * which cite them.
-	 */
-	break;
+	    i = READ16(xl->s2cbuf + 6);
+	    readfrom(xl, s2c, 8+i*4, 8);
+
+	    /*
+	     * The byte at the front of one of these packets is 0
+	     * for a failed authorisation, 1 for a successful
+	     * authorisation, and 2 for an incomplete authorisation
+	     * indicating more data should be sent.
+	     *
+	     * Since we proxy the X authorisation ourselves and have
+	     * a fixed set of protocols we understand of which we
+	     * know none involve type-2 packets, we never expect to
+	     * see one. 0 is also grounds for ceasing to log the
+	     * connection; that leaves 1, which terminates this loop
+	     * and we move on to the main phase of the protocol.
+	     *
+	     * (We might some day need to extend this code so that a
+	     * type-2 packet is processed and we look for another
+	     * packet of this type, which is why I've written this
+	     * as a while loop with an unconditional break at the
+	     * end instead of simple straight-through code. We would
+	     * only need to stick a 'continue' at the end of
+	     * handling a type-2 packet to make this change.)
+	     */
+	    if (xl->s2cbuf[0] == 0)
+		err((xl, "server refused authorisation, reason \"%.*s\"",
+		     xl->s2cbuf + 8, min(xl->s2clen-8, xl->s2cbuf[1])));
+	    else if (xl->s2cbuf[0] == 2)
+		err((xl, "server sent incomplete-authorisation packet, which"
+		     " is unsupported by xtrace"));
+	    else if (xl->s2cbuf[0] != 1)
+		err((xl, "server sent unrecognised authorisation-time opcode %d",
+		     xl->s2cbuf[0]));
+
+	    /*
+	     * Now we're sitting on a successful authorisation
+	     * packet. FIXME: we might usefully log some of its
+	     * contents, though probably optionally. Even if we
+	     * don't, we could at least save some resource ids -
+	     * windows, colormaps, visuals and so on - to lend
+	     * context to logging of later requests which cite them.
+	     */
+	    break;
+	}
     }
 
     /*
@@ -3746,12 +3747,12 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
      */
     while (1) {
 	/* Read the base 32 bytes of any server packet. */
-	read(s2c, 32);
+	read(xl, s2c, 32);
 
 	/* If it's a reply, read additional data if any. */
 	if (xl->s2cbuf[0] == 1) {
 	    i = READ32(xl->s2cbuf + 4);
-	    readfrom(s2c, 32 + i*4, 32);
+	    readfrom(xl, s2c, 32 + i*4, 32);
 	}
 
 	/*
@@ -3809,30 +3810,47 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
  */
 struct ssh_channel {
     const struct plug_function_table *fn;
+    int type;
     Socket ps;   /* proxy-side socket (talking to the X client) */
     Socket xs;   /* x11fwd.c socket (talking to the X server) */
     struct xlog *xl;
+    int record_state;
+    unsigned rbase, rmask, rootwin, select, clientid, xrecordopcode;
+    unsigned char *xrecordbuf;
+    int xrecordlen, xrecordlimit, xrecordsize;
+    int xrecord_state;
 };
 
 struct X11Display *x11disp;
 
+void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len);
+
 void sshfwd_close(struct ssh_channel *c)
 {
-    sk_close(c->ps);
+    if (c->type == 0)
+	sk_close(c->ps);
     xlog_free(c->xl);
+    sfree(c->xrecordbuf);
     sfree(c);
 }
 
 int sshfwd_write(struct ssh_channel *c, char *buf, int len)
 {
-    xlog_s2c(c->xl, buf, len);
-    return sk_write(c->ps, buf, len);
+    if (c->type == 0) {
+	xlog_s2c(c->xl, buf, len);
+	return sk_write(c->ps, buf, len);
+    } else {
+	xrecord_gotdata(c, buf, len);
+	return 0;
+    }
 }
 
 void sshfwd_unthrottle(struct ssh_channel *c, int bufsize)
 {
-    if (bufsize < BUFLIMIT)
-	sk_set_frozen(c->ps, 0);
+    if (c->type == 0) {
+	if (bufsize < BUFLIMIT)
+	    sk_set_frozen(c->ps, 0);
+    }
 }
 
 static void xpconn_log(Plug plug, int type, SockAddr addr, int port,
@@ -3875,6 +3893,8 @@ static int xproxy_accepting(Plug p, OSSocket sock)
     const char *err;
 
     c->fn = &fn_table;
+    c->type = 0;		       /* forwarded X connection */
+    c->xrecordbuf = NULL;
 
     /*
      * FIXME: the network.h abstraction apparently contains no way
@@ -3884,7 +3904,7 @@ static int xproxy_accepting(Plug p, OSSocket sock)
      * NULL,-1 in the call below, and that'll let us provide
      * XDM-AUTHORIZATION-1 on the proxy socket if the user wants it.
      */
-    if ((err = x11_init(&c->xs, x11disp, c, NULL, -1, &cfg)) != NULL) {
+    if ((err = x11_init(&c->xs, x11disp, c, NULL, -1, &cfg, TRUE)) != NULL) {
 	fprintf(stderr, "Error opening connection to X display: %s\n", err);
 	return 1;		       /* reject connection */
     }
@@ -3898,7 +3918,7 @@ static int xproxy_accepting(Plug p, OSSocket sock)
     sk_set_private_ptr(s, c);
     sk_set_frozen(s, 0);
 
-    c->xl = xlog_new();
+    c->xl = xlog_new(0);	       /* type 0 = full X connection */
 
     return 0;
 }
@@ -3958,6 +3978,357 @@ int start_xproxy(const Config *cfg, int mindisplaynum)
     }
 
     return mindisplaynum;
+}
+
+/*
+ * Make our own connection to the X display with intent to use the X
+ * RECORD extension to eavesdrop on an existing client.
+ */
+void start_xrecord(const Config *cfg, int select, unsigned clientid)
+{
+    struct ssh_channel *c = snew(struct ssh_channel);
+    const char *err;
+
+    c->fn = NULL;		       /* no local socket for this 'channel' */
+    c->type = 1;		       /* X RECORD channel */
+    c->xrecordbuf = NULL;
+    c->xrecordlen = c->xrecordlimit = c->xrecordsize = 0;
+    c->xl = xlog_new(1);  /* type 1 = recording from after connection setup */
+
+    /*
+     * Start an X connection for which proxy-side authorisation will
+     * not be checked. We then supply no auth to that, and x11fwd.c
+     * will put in the right auth to talk to the original display.
+     */
+    if ((err = x11_init(&c->xs, x11disp, c, NULL, -1, cfg, FALSE)) != NULL) {
+	fprintf(stderr, "Error opening connection to X display: %s\n", err);
+	exit(1);
+    }
+
+    /*
+     * Set up the coroutine state for this connection, and call its
+     * gotdata function to start it off (since we must send data
+     * first).
+     */
+    c->xrecord_state = 0;
+    c->select = select;
+    c->clientid = clientid;
+    xrecord_gotdata(c, NULL, 0);
+}
+void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
+{
+    const unsigned char *data = (const unsigned char *)vdata;
+    char buf[512];
+
+    crBegin(c->xrecord_state);
+
+    /*
+     * Start by sending the X init packet, in which we don't need to
+     * bother placing any authorisation data.
+     */
+    buf[0] = 'B'; buf[1] = 0;	       /* byte order and padding */
+    PUT_16BIT_MSB_FIRST(buf+2, 11);    /* protocol-major-version */
+    PUT_16BIT_MSB_FIRST(buf+4, 0);     /* protocol-minor-version */
+    PUT_16BIT_MSB_FIRST(buf+6, 0);     /* auth-proto-name len (none) */
+    PUT_16BIT_MSB_FIRST(buf+8, 0);     /* auth-proto-data-len (none) */
+    PUT_16BIT_MSB_FIRST(buf+10, 0);    /* padding */
+    x11_send(c->xs, buf, 12);
+
+    /*
+     * We expect to see a successful authorisation and a welcome
+     * message. Extract our resource base and mask, plus the root
+     * window id.
+     *
+     * [FIXME: what are we supposed to do in a multi-screen
+     * situation?]
+     */
+    read(c, xrecord, 8);
+    readfrom(c, xrecord, 8+4*GET_16BIT_MSB_FIRST(c->xrecordbuf + 6), 8);
+    if (c->xrecordbuf[0] != 1) {
+	fprintf(stderr, "FIXME: proper error [unsuccessful X auth]\n");
+	exit(1);
+    }
+    c->rbase = GET_32BIT_MSB_FIRST(c->xrecordbuf + 12);
+    c->rmask = GET_32BIT_MSB_FIRST(c->xrecordbuf + 16);
+    {
+	int rootoffset = GET_16BIT_MSB_FIRST(c->xrecordbuf + 24);
+	rootoffset = 40 + ((rootoffset + 3) & ~3);
+	rootoffset += 8 * c->xrecordbuf[29];
+	c->rootwin = GET_32BIT_MSB_FIRST(c->xrecordbuf + rootoffset);
+    }
+
+    /*
+     * Simple means of allocating a small number of resource ids in
+     * such a way that they're easy to compute in a static manner
+     * and will not clash with one another no matter what (valid)
+     * value is taken by c->rmask.
+     */
+#define FONTID (c->rbase | (c->rmask & 0x11111111))
+#define CURID (c->rbase | (c->rmask & 0x22222222))
+#define RCID (c->rbase | (c->rmask & 0x33333333))
+
+    /*
+     * First check that the RECORD extension is present and correct.
+     * If it isn't, we should find out before we faff about getting
+     * the user to pick a window.
+     */
+    buf[0] = 98; buf[1] = 0;	       /* QueryExtension opcode and padding */
+    PUT_16BIT_MSB_FIRST(buf+2, 4);     /* request length */
+    PUT_16BIT_MSB_FIRST(buf+4, 6);     /* name length */
+    memset(buf+6, 0, 10);
+    memcpy(buf+8, "RECORD", 6);
+    x11_send(c->xs, buf, 16);
+
+    /*
+     * Read the reply, which hopefully will say Success and tell us
+     * the major opcode for the extension.
+     */
+    read(c, xrecord, 32);
+    if (c->xrecordbuf[0] == 1)
+	readfrom(c, xrecord,
+		 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+    if (c->xrecordbuf[0] != 1 || c->xrecordbuf[8] != 1) {
+	fprintf(stderr, "FIXME: proper error [expected successful queryext]\n");
+	exit(1);
+    }
+    c->xrecordopcode = c->xrecordbuf[9];
+
+    /*
+     * Now initialise the RECORD extension.
+     */
+    buf[0] = c->xrecordopcode; buf[1] = 0;/* RecordQueryVersion */
+    PUT_16BIT_MSB_FIRST(buf+2, 2);     /* request length */
+    PUT_16BIT_MSB_FIRST(buf+4, 1);     /* major version */
+    PUT_16BIT_MSB_FIRST(buf+6, 13);    /* minor version */
+    x11_send(c->xs, buf, 8);
+
+    /*
+     * Read the reply, which hopefully will say Success.
+     */
+    read(c, xrecord, 32);
+    if (c->xrecordbuf[0] == 1)
+	readfrom(c, xrecord,
+		 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+    if (c->xrecordbuf[0] != 1) {
+	fprintf(stderr, "FIXME: proper error [expected successful rqv]\n");
+	exit(1);
+    }
+
+    if (c->select) {
+	fprintf(stderr, "xtrace: click mouse in a window belonging to the "
+		"client you want to trace\n");
+
+	/*
+	 * Open the 'cursor' font.
+	 */
+	buf[0] = 45; buf[1] = 0;       /* OpenFont opcode and padding */
+	PUT_16BIT_MSB_FIRST(buf+2, 5); /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, FONTID);   /* font id */
+	PUT_16BIT_MSB_FIRST(buf+8, 6); /* name length */
+	memset(buf+10, 0, 10);
+	memcpy(buf+12, "cursor", 6);
+	x11_send(c->xs, buf, 20);
+
+	/*
+	 * Create a cursor based on a crosshair glyph from that
+	 * font.
+	 */
+	buf[0] = 94; buf[1] = 0;       /* CreateGlyphCursor opcode + padding */
+	PUT_16BIT_MSB_FIRST(buf+2, 8); /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, CURID);   /* cursor id */
+	PUT_32BIT_MSB_FIRST(buf+8, FONTID);   /* font id for cursor itself */
+	PUT_32BIT_MSB_FIRST(buf+12, FONTID);  /* font id for cursor mask */
+	PUT_16BIT_MSB_FIRST(buf+16, 34);  /* character code for cursor */
+	PUT_16BIT_MSB_FIRST(buf+18, 35);  /* character code for cursor mask */
+	PUT_16BIT_MSB_FIRST(buf+20, 0xFFFF);  /* foreground red */
+	PUT_16BIT_MSB_FIRST(buf+22, 0xFFFF);  /* foreground green */
+	PUT_16BIT_MSB_FIRST(buf+24, 0xFFFF);  /* foreground blue */
+	PUT_16BIT_MSB_FIRST(buf+26, 0x0000);  /* background red */
+	PUT_16BIT_MSB_FIRST(buf+28, 0x0000);  /* background green */
+	PUT_16BIT_MSB_FIRST(buf+30, 0x0000);  /* background blue */
+	x11_send(c->xs, buf, 32);
+
+	/*
+	 * Grab the mouse pointer, selecting the cursor we just
+	 * created.
+	 */
+	buf[0] = 26;		       /* GrabPointer opcode */
+	buf[1] = 0;		       /* owner-events */
+	PUT_16BIT_MSB_FIRST(buf+2, 6); /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, c->rootwin); /* grab window id */
+	PUT_16BIT_MSB_FIRST(buf+8, 4); /* event mask (ButtonPress only) */
+	buf[10] = 1;		       /* pointer-mode = Asynchronous */
+	buf[11] = 1;		       /* keyboard-mode = Asynchronous */
+	PUT_32BIT_MSB_FIRST(buf+12, c->rootwin); /* confine window id */
+	PUT_32BIT_MSB_FIRST(buf+16, CURID); /* cursor id */
+	PUT_32BIT_MSB_FIRST(buf+20, 0); /* timestamp = CurrentTime */
+	x11_send(c->xs, buf, 24);
+
+	/*
+	 * Now we expect to see a reply to the GrabPointer
+	 * operation. If that says Success, we can then sit and wait
+	 * for a ButtonPress event which will give us a resource id
+	 * to trace.
+	 */
+	read(c, xrecord, 32);
+	if (c->xrecordbuf[0] == 1)
+	    readfrom(c, xrecord,
+		     32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	if (c->xrecordbuf[0] != 1 || c->xrecordbuf[1] != 0) {
+	    fprintf(stderr, "FIXME: proper error [expected successful grabpointer]\n");
+	    exit(1);
+	}
+
+	/*
+	 * Wait for our ButtonPress.
+	 */
+	read(c, xrecord, 32);
+	if (c->xrecordbuf[0] == 1)
+	    readfrom(c, xrecord,
+		     32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	if ((c->xrecordbuf[0] & 0x7F) != 4) {
+	    fprintf(stderr, "FIXME: proper error [expected buttonpress]\n");
+	    exit(1);
+	}
+	c->clientid = GET_32BIT_MSB_FIRST(c->xrecordbuf + 16);
+
+	/*
+	 * We've got our base window id. Now we can ungrab the
+	 * pointer, free our cursor, and close our font.
+	 */
+	buf[0] = 27; buf[1] = 0;       /* UngrabPointer opcode and padding */
+	PUT_16BIT_MSB_FIRST(buf+2, 2); /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, 0); /* timestamp = CurrentTime */
+	x11_send(c->xs, buf, 8);
+	buf[0] = 95;		       /* FreeCursor opcode */
+	buf[1] = 0;		       /* unused */
+	PUT_16BIT_MSB_FIRST(buf+2, 2); /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, CURID); /* cursor id to free */
+	x11_send(c->xs, buf, 8);
+	buf[0] = 46;		       /* CloseFont opcode */
+	buf[1] = 0;		       /* unused */
+	PUT_16BIT_MSB_FIRST(buf+2, 2); /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, FONTID); /* font id to free */
+	x11_send(c->xs, buf, 8);
+
+	/*
+	 * FIXME: now we must fiddle about some more, because the
+	 * window id we've retrieved was almost certainly owned by
+	 * the WM rather than by some actual client.
+	 */
+    }
+
+    /*
+     * Initialise and start a recording context for the given client
+     * id.
+     */
+    buf[0] = c->xrecordopcode; buf[1] = 1;/* RecordCreateContext */
+    PUT_16BIT_MSB_FIRST(buf+2, 12);    /* request length */
+    PUT_32BIT_MSB_FIRST(buf+4, RCID);  /* context id */
+    buf[8] = 0;			       /* element header (none) */
+    buf[9] = buf[10] = buf[11] = 0;    /* padding */
+    PUT_32BIT_MSB_FIRST(buf+12, 1);    /* number of client ids */
+    PUT_32BIT_MSB_FIRST(buf+16, 1);    /* number of record ranges */
+    PUT_32BIT_MSB_FIRST(buf+20, c->clientid);    /* client id itself */
+    buf[24] = 0; buf[25] = 127;	       /* want all core requests */
+    buf[26] = 0; buf[27] = 127;	       /* and all core replies */
+    buf[28] = 128; buf[29] = 255;      /* want all extension major opcodes */
+    PUT_16BIT_MSB_FIRST(buf+30, 0);
+    PUT_16BIT_MSB_FIRST(buf+32, 65535);/* and all extension minor opcodes */
+    buf[34] = 128; buf[35] = 255;      /* and the same in replies */
+    PUT_16BIT_MSB_FIRST(buf+36, 0);
+    PUT_16BIT_MSB_FIRST(buf+38, 65535);
+    buf[40] = 2; buf[41] = 255;	       /* want all delivered events */
+    buf[42] = 0; buf[43] = 0;	       /* but no device events */
+    buf[44] = 0; buf[45] = 255;	       /* want all errors */
+    buf[46] = 0;		       /* don't want client-started */
+    buf[47] = 1;		       /* but do want client-died */
+    x11_send(c->xs, buf, 48);
+
+    buf[0] = c->xrecordopcode; buf[1] = 5;/* RecordEnableContext */
+    PUT_16BIT_MSB_FIRST(buf+2, 2);     /* request length */
+    PUT_32BIT_MSB_FIRST(buf+4, RCID);  /* context id */
+    x11_send(c->xs, buf, 8);
+
+    /*
+     * Now we expect to receive an indefinite stream of replies to
+     * that last request.
+     */
+    while (1) {
+	read(c, xrecord, 32);
+	if (c->xrecordbuf[0] == 1)
+	    readfrom(c, xrecord,
+		 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	if ((c->xrecordbuf[0] & 0x7F) == 4) {
+	    /*
+	     * Another ButtonPress event, probably sent to us after
+	     * the one we received above but before we managed to
+	     * ungrab the pointer. Ignore it.
+	     */
+	    continue;
+	}
+	if (c->xrecordbuf[0] != 1) {
+	    fprintf(stderr, "FIXME: proper error [expected recorded data]\n");
+	    exit(1);
+	}
+#if 0
+/* Hex dump of the received data, kept in case it comes in handy again. */
+{
+ int n,k,i;
+ char dumpbuf[128], tmpbuf[16];
+ fprintf(stderr, "RECORD output type %d:\n", c->xrecordbuf[1]);
+ for (n = 32; n < c->xrecordlen; n += 16) {
+  k = c->xrecordlen - n;
+  if (k > 16) k = 16;
+  memset(dumpbuf, ' ', 8+2+16*3+1+k);
+  dumpbuf[8+2+16*3+1+k] = '\n';
+  dumpbuf[8+2+16*3+1+k+1] = '\0';
+  memcpy(dumpbuf, tmpbuf, sprintf(tmpbuf, "%08X", n-32));
+  for (i=0;i<k;i++) {
+   memcpy(dumpbuf+8+2+3*i, tmpbuf, sprintf(tmpbuf, "%02X", c->xrecordbuf[n+i]));
+   dumpbuf[8+2+16*3+1+i] = (isprint(c->xrecordbuf[n+i]) ? c->xrecordbuf[n+i] : '.');
+  }
+  fputs(dumpbuf, stderr);
+ }
+}
+#endif
+	switch (c->xrecordbuf[1]) {
+	  case 4:
+	    /*
+	     * StartOfData record, sent immediately after we enabled
+	     * the recording context. Ignore it.
+	     */
+	    break;
+	  case 1:
+	    /*
+	     * Data from the client, i.e. requests. Expect it to
+	     * come with a header telling us its sequence number.
+	     */
+	    c->xl->endianness = c->xrecordbuf[9]?'l':'B';
+	    c->xl->nextseq = GET_32BIT_MSB_FIRST(c->xrecordbuf+20);
+	    xlog_c2s(c->xl, c->xrecordbuf + 32, c->xrecordlen - 32);
+	    break;
+	  case 0:
+	    /*
+	     * Data from the server, i.e. replies, errors and
+	     * events. Expect it to come with a header telling us
+	     * its sequence number.
+	     */
+	    c->xl->endianness = c->xrecordbuf[9]?'l':'B';
+	    xlog_s2c(c->xl, c->xrecordbuf + 32, c->xrecordlen - 32);
+	    break;
+	  case 3:
+	    /*
+	     * The client has exited. Successful termination!
+	     */
+	    exit(0);
+	  default:
+	    fprintf(stderr, "FIXME: proper error [unexpected data record]\n");
+	    break;
+	}
+    }
+
+    crFinish;
 }
 
 /* ----------------------------------------------------------------------
@@ -4034,10 +4405,14 @@ int main(int argc, char **argv)
     int displaynum;
     char hostname[1024];
     pid_t pid;
+    int xrecord, selectclient;
+    unsigned clientid;
     int doing_opts = TRUE;
 
     fdlist = NULL;
     fdcount = fdsize = 0;
+    xrecord = FALSE;
+    selectclient = FALSE;
 
     cfg.x11_display[0] = '\0';
 
@@ -4061,6 +4436,7 @@ int main(int argc, char **argv)
 
 		switch (c) {
 		  case 'o':
+		  case 'p':
 		    /* options requiring an argument */
 		    if (*p)
 			val = p;
@@ -4074,6 +4450,20 @@ int main(int argc, char **argv)
 		    switch (c) {
 		      case 'o':
 			logfile = val;
+			break;
+		      case 'p':
+			xrecord = TRUE;
+			if (!strcmp(val, "-")) {
+			    selectclient = TRUE;
+			} else {
+			    selectclient = FALSE;
+			    if (!sscanf(val, "%x", &clientid) &&
+				!sscanf(val, "0x%x", &clientid) &&
+				!sscanf(val, "0X%x", &clientid)) {
+				fprintf(stderr, "xtrace: option '-p' expects"
+					" either a hex resource id or '-'\n");
+			    }
+			}
 			break;
 		    }
 		    break;
@@ -4093,7 +4483,7 @@ int main(int argc, char **argv)
 	}
     }
 
-    if (!cmd) {
+    if (!xrecord && !cmd) {
 	fprintf(stderr, "xtrace: must specify a command to run\n");
 	return 1;
     }
@@ -4119,66 +4509,70 @@ int main(int argc, char **argv)
 	xlogfp = stderr;
 
     signal(SIGCHLD, sigchld);
-    displaynum = start_xproxy(&cfg, 10);
     x11disp = x11_setup_display(cfg.x11_display, X11_MIT, &cfg);
+    if (xrecord) {
+	start_xrecord(&cfg, selectclient, clientid);
+    } else {
+	displaynum = start_xproxy(&cfg, 10);
 
-    /* FIXME: configurable directory? At the very least, look at TMPDIR etc */
-    authfilename = dupstr("/tmp/xtrace-authority-XXXXXX");
-    {
-	int authfd, oldumask;
-	FILE *authfp;
-	SockAddr addr;
-	char *canonicalname;
-	char addrbuf[4];
-	char dispnumstr[64];
+	/* FIXME: configurable directory? At the very least, look at TMPDIR etc */
+	authfilename = dupstr("/tmp/xtrace-authority-XXXXXX");
+	{
+	    int authfd, oldumask;
+	    FILE *authfp;
+	    SockAddr addr;
+	    char *canonicalname;
+	    char addrbuf[4];
+	    char dispnumstr[64];
 
-	oldumask = umask(077);
-	authfd = mkstemp(authfilename);
-	umask(oldumask);
+	    oldumask = umask(077);
+	    authfd = mkstemp(authfilename);
+	    umask(oldumask);
 
-	authfp = fdopen(authfd, "wb");
+	    authfp = fdopen(authfd, "wb");
 
-	addr = name_lookup(hostname, 6000 + displaynum, &canonicalname,
-			   &cfg, ADDRTYPE_IPV4);
-	sk_addrcopy(addr, addrbuf);
+	    addr = name_lookup(hostname, 6000 + displaynum, &canonicalname,
+			       &cfg, ADDRTYPE_IPV4);
+	    sk_addrcopy(addr, addrbuf);
 
-	/* Big-endian 2-byte number: zero, meaning IPv4 */
-	fputc(0, authfp);
-	fputc(0, authfp);
-	/* Length-4 string which is the IP address in binary */
-	fputc(0, authfp);
-	fputc(4, authfp);
-	fwrite(addrbuf, 1, 4, authfp);
-	/* String form of the display number */
-	sprintf(dispnumstr, "%d", displaynum);
-	fputc(strlen(dispnumstr) >> 8, authfp);
-	fputc(strlen(dispnumstr) & 0xFF, authfp);
-	fputs(dispnumstr, authfp);
-	/* String giving the auth type */
-	fputc(strlen(x11disp->remoteauthprotoname) >> 8, authfp);
-	fputc(strlen(x11disp->remoteauthprotoname) & 0xFF, authfp);
-	fputs(x11disp->remoteauthprotoname, authfp);
-	/* String giving the auth data itself */
-	fputc(x11disp->remoteauthdatalen >> 8, authfp);
-	fputc(x11disp->remoteauthdatalen & 0xFF, authfp);
-	fwrite(x11disp->remoteauthdata, 1, x11disp->remoteauthdatalen, authfp);
+	    /* Big-endian 2-byte number: zero, meaning IPv4 */
+	    fputc(0, authfp);
+	    fputc(0, authfp);
+	    /* Length-4 string which is the IP address in binary */
+	    fputc(0, authfp);
+	    fputc(4, authfp);
+	    fwrite(addrbuf, 1, 4, authfp);
+	    /* String form of the display number */
+	    sprintf(dispnumstr, "%d", displaynum);
+	    fputc(strlen(dispnumstr) >> 8, authfp);
+	    fputc(strlen(dispnumstr) & 0xFF, authfp);
+	    fputs(dispnumstr, authfp);
+	    /* String giving the auth type */
+	    fputc(strlen(x11disp->remoteauthprotoname) >> 8, authfp);
+	    fputc(strlen(x11disp->remoteauthprotoname) & 0xFF, authfp);
+	    fputs(x11disp->remoteauthprotoname, authfp);
+	    /* String giving the auth data itself */
+	    fputc(x11disp->remoteauthdatalen >> 8, authfp);
+	    fputc(x11disp->remoteauthdatalen & 0xFF, authfp);
+	    fwrite(x11disp->remoteauthdata, 1, x11disp->remoteauthdatalen, authfp);
 
-	fclose(authfp);
+	    fclose(authfp);
+	}
+
+	pid = fork();
+	if (pid < 0) {
+	    perror("fork");
+	    unlink(authfilename);
+	    exit(1);
+	} else if (pid == 0) {
+	    putenv(dupprintf("DISPLAY=%s:%d", hostname, displaynum));
+	    putenv(dupprintf("XAUTHORITY=%s", authfilename));
+	    execvp(cmd[0], cmd);
+	    perror("exec");
+	    exit(127);
+	} else
+	    childpid = pid;
     }
-
-    pid = fork();
-    if (pid < 0) {
-	perror("fork");
-	unlink(authfilename);
-	exit(1);
-    } else if (pid == 0) {
-	putenv(dupprintf("DISPLAY=%s:%d", hostname, displaynum));
-	putenv(dupprintf("XAUTHORITY=%s", authfilename));
-	execvp(cmd[0], cmd);
-	perror("exec");
-	exit(127);
-    } else
-	childpid = pid;
 
     now = GETTICKCOUNT();
 
