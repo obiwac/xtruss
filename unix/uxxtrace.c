@@ -786,11 +786,17 @@ void xlog_request_done(struct xlog *xl, struct request *req)
 /* Indicate that we're about to print a response to a particular request */
 void xlog_respond_to(struct request *req)
 {
-    if (currreq != req) {
-	xlog_new_line();
-	fprintf(xlogfp, " ... %s = ", req->text);
-    } else {
+    if (req != NULL && currreq == req) {
 	fprintf(xlogfp, " = ");
+    } else {
+	if (currreq) {
+	    xlog_new_line();
+	    currreq = NULL;
+	}
+	if (req)
+	    fprintf(xlogfp, " ... %s = ", req->text);
+	else
+	    fprintf(xlogfp, "--- error received for unknown request: ");
     }
 }
 
@@ -3572,7 +3578,7 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     /*
      * Dequeue this request, now we've seen an error response to it.
      */
-    {
+    if (xl->rhead) {
 	struct request *newhead = xl->rhead->next;
 	free_request(xl->rhead);
 	xl->rhead = newhead;
