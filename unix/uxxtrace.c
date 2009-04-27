@@ -235,7 +235,7 @@ struct xlog *xlog_new(int type)
     xl->textbuf = NULL;
     xl->textbuflen = xl->textbufsize = 0;
     xl->rhead = xl->rtail = NULL;
-    xl->nextseq = 0;
+    xl->nextseq = 1;
     xl->type = type;
     return xl;
 }
