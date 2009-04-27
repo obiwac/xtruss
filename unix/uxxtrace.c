@@ -2820,7 +2820,7 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
     if (data && !req) {
 	xlog_new_line();
 	fprintf(xlogfp, "--- reply received for unknown request sequence"
-		" number %lu\n", (unsigned long)FETCH16(data, 4));
+		" number %lu\n", (unsigned long)FETCH16(data, 2));
 	fflush(xlogfp);
 	return;
     }
@@ -3768,7 +3768,7 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 	 */
 	if (xl->s2cbuf[0] != 11) {
 	    i = READ16(xl->s2cbuf + 2);
-	    while (xl->rhead && xl->rhead->seqnum != i) {
+	    while (xl->rhead && (xl->rhead->seqnum & 0xFFFF) != i) {
 		struct request *nexthead = xl->rhead->next;
 		if (xl->rhead->replies) {
 		    /* A request that expected a reply got none. Report that. */
