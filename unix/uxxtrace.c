@@ -22,9 +22,6 @@
 /*
  * Definitely TODO:
  *
- *  - Finish up the X RECORD stuff, by polishing its error handling
- *    and finishing the interactive window selection code.
- *
  *  - Command-line-configurable filtering based on request and event
  *    types.
  *
@@ -882,9 +879,84 @@ void xlog_charinfo(struct xlog *xl, const unsigned char *data,
     xlog_param(xl, "attributes", DEC16, FETCH16(data, pos+10));
 }
 
+const char *xlog_translate_event(int eventtype)
+{
+    switch (eventtype & 0x7F) {
+      case 2:
+	return "KeyPress";
+      case 3:
+	return "KeyRelease";
+      case 4:
+	return "ButtonPress";
+      case 5:
+	return "ButtonRelease";
+      case 6:
+	return "MotionNotify";
+      case 7:
+	return "EnterNotify";
+      case 8:
+	return "LeaveNotify";
+      case 9:
+	return "FocusIn";
+      case 10:
+	return "FocusOut";
+      case 11:
+	return "KeymapNotify";
+      case 12:
+	return "Expose";
+      case 13:
+	return "GraphicsExposure";
+      case 14:
+	return "NoExposure";
+      case 15:
+	return "VisibilityNotify";
+      case 16:
+	return "CreateNotify";
+      case 17:
+	return "DestroyNotify";
+      case 18:
+	return "UnmapNotify";
+      case 19:
+	return "MapNotify";
+      case 20:
+	return "MapRequest";
+      case 21:
+	return "ReparentNotify";
+      case 22:
+	return "ConfigureNotify";
+      case 23:
+	return "ConfigureRequest";
+      case 24:
+	return "GravityNotify";
+      case 25:
+	return "ResizeRequest";
+      case 26:
+	return "CirculateNotify";
+      case 27:
+	return "CirculateRequest";
+      case 28:
+	return "PropertyNotify";
+      case 29:
+	return "SelectionClear";
+      case 30:
+	return "SelectionRequest";
+      case 31:
+	return "SelectionNotify";
+      case 32:
+	return "ColormapNotify";
+      case 33:
+	return "ClientMessage";
+      case 34:
+	return "MappingNotify";
+      default:
+	return NULL;
+    }
+}
+
 void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 {
     int event;
+    const char *name;
 
     xl->reqlogstate = 3;
 
@@ -893,16 +965,13 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, "SendEvent-generated ");
 	event &= ~0x80;
     }
+    name = xlog_translate_event(event);
+    xlog_printf(xl, "%s", name);
     switch (event) {
       case 2: case 3: case 4: case 5: case 6: case 7: case 8:
-	xlog_printf(xl, "%s(",
-		    (event==2 ? "KeyPress" :
-		     event==3 ? "KeyRelease" :
-		     event==4 ? "ButtonPress" :
-		     event==5 ? "ButtonRelease" :
-		     event==6 ? "MotionNotify" :
-		     event==7 ? "EnterNotify" :
-		     /* event==8 ? */ "LeaveNotify"));
+	/* KeyPress, KeyRelease, ButtonPress, ButtonRelease, MotionNotify,
+	 * EnterNotify, LeaveNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "root", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+12));
 	xlog_param(xl, "child", WINDOW | SPECVAL, FETCH32(data, pos+16),
@@ -934,9 +1003,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 9: case 10:
-	xlog_printf(xl, "%s(",
-		    (event==9 ? "FocusIn" :
-		     /* event==3 ? */ "FocusOut"));
+	/* FocusIn, FocusOut */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, pos+8),
 		   "Normal", 0, "Grab", 1, "Ungrab", 2,
@@ -948,7 +1016,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 11:
-	xlog_printf(xl, "KeymapNotify(");
+	/* KeymapNotify */
+	xlog_printf(xl, "(");
 	{
 	    int i;
 	    int ppos = pos + 1;
@@ -963,7 +1032,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 12:
-	xlog_printf(xl, "Expose(");
+	/* Expose */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "x", DECU, FETCH16(data, pos+8));
 	xlog_param(xl, "y", DECU, FETCH16(data, pos+10));
@@ -973,7 +1043,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 13:
-	xlog_printf(xl, "GraphicsExposure(");
+	/* GraphicsExposure */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, pos+4));
 	xlog_param(xl, "x", DECU, FETCH16(data, pos+8));
 	xlog_param(xl, "y", DECU, FETCH16(data, pos+10));
@@ -986,7 +1057,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 14:
-	xlog_printf(xl, "NoExposure(");
+	/* NoExposure */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, pos+4));
 	xlog_param(xl, "major-opcode", DECU | SPECVAL, FETCH8(data, pos+10),
 		   "CopyArea", 62, "CopyPlane", 63, (char *)NULL);
@@ -994,7 +1066,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 15:
-	xlog_printf(xl, "VisibilityNotify(");
+	/* VisibilityNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "state", ENUM | SPECVAL, FETCH8(data, pos+8),
 		   "Unobscured", 0, "PartiallyObscured", 1,
@@ -1002,7 +1075,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 16:
-	xlog_printf(xl, "CreateNotify(");
+	/* CreateNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, pos+12));
@@ -1014,33 +1088,38 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 17:
-	xlog_printf(xl, "DestroyNotify(");
+	/* DestroyNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_printf(xl, ")");
 	break;
       case 18:
-	xlog_printf(xl, "UnmapNotify(");
+	/* UnmapNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "from-configure", BOOLEAN, FETCH8(data, pos+12));
 	xlog_printf(xl, ")");
 	break;
       case 19:
-	xlog_printf(xl, "MapNotify(");
+	/* MapNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "override-redirect", BOOLEAN, FETCH8(data, pos+12));
 	xlog_printf(xl, ")");
 	break;
       case 20:
-	xlog_printf(xl, "MapRequest(");
+	/* MapRequest */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_printf(xl, ")");
 	break;
       case 21:
-	xlog_printf(xl, "ReparentNotify(");
+	/* ReparentNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+12));
@@ -1050,7 +1129,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 22:
-	xlog_printf(xl, "ConfigureNotify(");
+	/* ConfigureNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, pos+16));
@@ -1064,7 +1144,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 23:
-	xlog_printf(xl, "ConfigureRequest(");
+	/* ConfigureRequest */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, pos+16));
@@ -1098,7 +1179,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 24:
-	xlog_printf(xl, "GravityNotify(");
+	/* GravityNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, pos+12));
@@ -1106,14 +1188,16 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 25:
-	xlog_printf(xl, "ResizeRequest(");
+	/* ResizeRequest */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "width", DEC16, FETCH16(data, pos+8));
 	xlog_param(xl, "height", DEC16, FETCH16(data, pos+10));
 	xlog_printf(xl, ")");
 	break;
       case 26:
-	xlog_printf(xl, "CirculateNotify(");
+	/* CirculateNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "place", ENUM | SPECVAL, FETCH8(data, pos+16),
@@ -1121,7 +1205,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 27:
-	xlog_printf(xl, "CirculateRequest(");
+	/* CirculateRequest */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "place", ENUM | SPECVAL, FETCH8(data, pos+16),
@@ -1129,7 +1214,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 28:
-	xlog_printf(xl, "PropertyNotify(");
+	/* PropertyNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "atom", ATOM, FETCH32(data, pos+8));
 	xlog_param(xl, "state", ENUM | SPECVAL, FETCH8(data, pos+16),
@@ -1138,14 +1224,16 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 29:
-	xlog_printf(xl, "SelectionClear(");
+	/* SelectionClear */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "owner", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "selection", ATOM, FETCH32(data, pos+12));
 	xlog_param(xl, "time", HEX32, FETCH32(data, pos+4));
 	xlog_printf(xl, ")");
 	break;
       case 30:
-	xlog_printf(xl, "SelectionRequest(");
+	/* SelectionRequest */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "owner", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "selection", ATOM, FETCH32(data, pos+16));
 	xlog_param(xl, "target", ATOM, FETCH32(data, pos+20));
@@ -1157,7 +1245,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 31:
-	xlog_printf(xl, "SelectionNotify(");
+	/* SelectionNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "requestor", WINDOW, FETCH32(data, pos+8));
 	xlog_param(xl, "selection", ATOM, FETCH32(data, pos+12));
 	xlog_param(xl, "target", ATOM, FETCH32(data, pos+16));
@@ -1168,7 +1257,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 32:
-	xlog_printf(xl, "ColormapNotify(");
+	/* ColormapNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "colormap", COLORMAP | SPECVAL, FETCH32(data, pos+8),
 		   "None", 0, (char *)NULL);
@@ -1178,7 +1268,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 33:
-	xlog_printf(xl, "ClientMessage(");
+	/* ClientMessage */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "type", ATOM, FETCH32(data, pos+8));
 	xlog_param(xl, "format", DECU, FETCH8(data, pos+1));
@@ -1186,7 +1277,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       case 34:
-	xlog_printf(xl, "MappingNotify(");
+	/* MappingNotify */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "request", ENUM | SPECVAL, FETCH8(data, pos+4),
 		   "Modifier", 0, "Keyboard", 1, "Pointer", 2, (char *)NULL);
 	xlog_param(xl, "first-keycode", DECU, FETCH8(data, pos+5));
@@ -3474,11 +3566,54 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
     }
 }
 
+const char *xlog_translate_error(int errcode)
+{
+    switch (errcode) {
+      case 1:
+	return "BadRequest";
+      case 2:
+	return "BadValue";
+      case 3:
+	return "BadWindow";
+      case 4:
+	return "BadPixmap";
+      case 5:
+	return "BadAtom";
+      case 6:
+	return "BadCursor";
+      case 7:
+	return "BadFont";
+      case 8:
+	return "BadMatch";
+      case 9:
+	return "BadDrawable";
+      case 10:
+	return "BadAccess";
+      case 11:
+	return "BadAlloc";
+      case 12:
+	return "BadColormap";
+      case 13:
+	return "BadGContext";
+      case 14:
+	return "BadIDChoice";
+      case 15:
+	return "BadName";
+      case 16:
+	return "BadLength";
+      case 17:
+	return "BadImplementation";
+      default:
+	return NULL;
+    }
+}
+
 void xlog_do_error(struct xlog *xl, struct request *req,
 		   const void *vdata, int len)
 {
     const unsigned char *data = (const unsigned char *)vdata;
     int errcode;
+    const char *error;
 
     xl->textbuflen = 0;
     xl->overflow = FALSE;
@@ -3488,89 +3623,105 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     xl->reqlogstate = 3;	       /* for things with parameters */
 
     errcode = FETCH8(data, 1);
+    error = xlog_translate_error(errcode);
+    if (error)
+	xlog_printf(xl, "%s", error);
+    else
+	xlog_printf(xl, "UnknownError%d", errcode);
     switch (errcode) {
       case 1:
-	xlog_printf(xl, "BadRequest");
+	/* BadRequest */
 	break;
       case 2:
-	xlog_printf(xl, "BadValue(");
+	/* BadValue */
+	xlog_printf(xl, "(");
 	xlog_param(xl, "value", HEX32, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 3:
-	xlog_printf(xl, "BadWindow(");
+	/* BadWindow */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 4:
-	xlog_printf(xl, "BadPixmap(");
+	/* BadPixmap */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "pixmap", PIXMAP, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 5:
-	xlog_printf(xl, "BadAtom(");
+	/* BadAtom */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "atom", ATOM, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 6:
-	xlog_printf(xl, "BadCursor(");
+	/* BadCursor */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "cursor", CURSOR, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 7:
-	xlog_printf(xl, "BadFont(");
+	/* BadFont */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "font", FONT, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 8:
-	xlog_printf(xl, "BadMatch");
+	/* BadMatch */
 	break;
       case 9:
-	xlog_printf(xl, "BadDrawable(");
+	/* BadDrawable */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 10:
-	xlog_printf(xl, "BadAccess");
+	/* BadAccess */
 	break;
       case 11:
-	xlog_printf(xl, "BadAlloc");
+	/* BadAlloc */
 	break;
       case 12:
-	xlog_printf(xl, "BadColormap(");
+	/* BadColormap */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "colormap", COLORMAP, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 13:
-	xlog_printf(xl, "BadGContext(");
+	/* BadGContext */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 14:
-	xlog_printf(xl, "BadIDChoice(");
+	/* BadIDChoice */
+	xlog_printf(xl, "(");
 	xl->reqlogstate = 3;
 	xlog_param(xl, "id", HEX32, FETCH32(data, 4));
 	xlog_printf(xl, ")");
 	break;
       case 15:
-	xlog_printf(xl, "BadName");
+	/* BadName */
 	break;
       case 16:
-	xlog_printf(xl, "BadLength");
+	/* BadLength */
 	break;
       case 17:
-	xlog_printf(xl, "BadImplementation");
+	/* BadImplementation */
 	break;
       default:
-	xlog_printf(xl, "UnknownError%d", errcode);
+	/* UnknownError */
+	break;
     }
 
     xlog_response_done(xl->textbuf);
@@ -3814,6 +3965,10 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
  * rather than via messages from an SSH server, but then passes them
  * on to x11fwd.c just as if they had come from the latter.
  */
+struct winq {
+    unsigned winid;
+    struct winq *next;
+};
 struct ssh_channel {
     const struct plug_function_table *fn;
     int type;
@@ -3821,10 +3976,11 @@ struct ssh_channel {
     Socket xs;   /* x11fwd.c socket (talking to the X server) */
     struct xlog *xl;
     int record_state;
-    unsigned rbase, rmask, rootwin, select, clientid, xrecordopcode;
+    unsigned rbase, rmask, rootwin, select, clientid, xrecordopcode, wmsatom;
     unsigned char *xrecordbuf;
     int xrecordlen, xrecordlimit, xrecordsize;
     int xrecord_state;
+    struct winq *whead, *wtail;
 };
 
 struct X11Display *x11disp;
@@ -4051,7 +4207,11 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     read(c, xrecord, 8);
     readfrom(c, xrecord, 8+4*GET_16BIT_MSB_FIRST(c->xrecordbuf + 6), 8);
     if (c->xrecordbuf[0] != 1) {
-	fprintf(stderr, "FIXME: proper error [unsuccessful X auth]\n");
+	int n = c->xrecordbuf[1];
+	if (n > c->xrecordlen - 8)
+	    n = c->xrecordlen - 8;
+	fprintf(stderr, "xtrace: X server denied authentication (\"%.*s\")\n",
+		n, c->xrecordbuf + 8);
 	exit(1);
     }
     c->rbase = GET_32BIT_MSB_FIRST(c->xrecordbuf + 12);
@@ -4093,8 +4253,32 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     if (c->xrecordbuf[0] == 1)
 	readfrom(c, xrecord,
 		 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
-    if (c->xrecordbuf[0] != 1 || c->xrecordbuf[8] != 1) {
-	fprintf(stderr, "FIXME: proper error [expected successful queryext]\n");
+
+#define EXPECT_REPLY(name) do { \
+    if (c->xrecordbuf[0] == 0) { \
+	const char *err = xlog_translate_error(c->xrecordbuf[1]); \
+	if (err) \
+	    fprintf(stderr, "xtrace: X server returned %s error to" \
+		    " RecordQueryVersion\n", err); \
+	else \
+	    fprintf(stderr, "xtrace: X server returned unknown error %d to" \
+		    " RecordQueryVersion\n", c->xrecordbuf[1]); \
+	exit(1); \
+    } else if (c->xrecordbuf[0] != 1) { \
+	const char *ev = xlog_translate_event(c->xrecordbuf[0]); \
+	if (ev) \
+	    fprintf(stderr, "xtrace: unexpected event received (%s)\n", ev); \
+	else \
+	    fprintf(stderr, "xtrace: unexpected event received (%d)\n", \
+		    c->xrecordbuf[0]); \
+	exit(1); \
+    } \
+} while (0)
+
+    EXPECT_REPLY("QueryExtension");
+    if (c->xrecordbuf[8] != 1) {
+	fprintf(stderr, "xtrace: cannot use -p: X server does not support"
+		" the X RECORD extension\n");
 	exit(1);
     }
     c->xrecordopcode = c->xrecordbuf[9];
@@ -4115,10 +4299,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     if (c->xrecordbuf[0] == 1)
 	readfrom(c, xrecord,
 		 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
-    if (c->xrecordbuf[0] != 1) {
-	fprintf(stderr, "FIXME: proper error [expected successful rqv]\n");
-	exit(1);
-    }
+    EXPECT_REPLY("RecordQueryVersion");
 
     if (c->select) {
 	fprintf(stderr, "xtrace: click mouse in a window belonging to the "
@@ -4180,8 +4361,19 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	if (c->xrecordbuf[0] == 1)
 	    readfrom(c, xrecord,
 		     32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
-	if (c->xrecordbuf[0] != 1 || c->xrecordbuf[1] != 0) {
-	    fprintf(stderr, "FIXME: proper error [expected successful grabpointer]\n");
+	EXPECT_REPLY("GrabPointer");
+	if (c->xrecordbuf[1] != 0) {
+	    char reason[32];
+	    switch (c->xrecordbuf[1]) {
+	      case 1: sprintf(reason, "AlreadyGrabbed"); break;
+	      case 2: sprintf(reason, "InvalidTime"); break;
+	      case 3: sprintf(reason, "NotViewable"); break;
+	      case 4: sprintf(reason, "Frozen"); break;
+	      default: sprintf(reason, "unknown error code %d",
+			       c->xrecordbuf[1]); break;
+	    }
+	    fprintf(stderr, "xtrace: could not grab mouse pointer for window"
+		    " selection: %s\n", reason);
 	    exit(1);
 	}
 
@@ -4192,10 +4384,29 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	if (c->xrecordbuf[0] == 1)
 	    readfrom(c, xrecord,
 		     32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
-	if ((c->xrecordbuf[0] & 0x7F) != 4) {
-	    fprintf(stderr, "FIXME: proper error [expected buttonpress]\n");
-	    exit(1);
-	}
+#define EXPECT_EVENT(num) do { \
+    if (c->xrecordbuf[0] == 0) { \
+	const char *err = xlog_translate_error(c->xrecordbuf[1]); \
+	if (err) \
+	    fprintf(stderr, "xtrace: X server returned unexpected %s " \
+		    "error\n", err); \
+	else \
+	    fprintf(stderr, "xtrace: X server returned unexpected and " \
+		    "unknown error %d\n", c->xrecordbuf[1]); \
+	exit(1); \
+    } else if (c->xrecordbuf[0] == 1) { \
+	fprintf(stderr, "xtrace: unexpected reply received\n"); \
+    } else if ((c->xrecordbuf[0] & 0x7F) != num) { \
+	const char *ev = xlog_translate_event(c->xrecordbuf[0]); \
+	if (ev) \
+	    fprintf(stderr, "xtrace: unexpected event received (%s)\n", ev); \
+	else \
+	    fprintf(stderr, "xtrace: unexpected event received (%d)\n", \
+		    c->xrecordbuf[0]); \
+	exit(1); \
+    } \
+} while (0)
+	EXPECT_EVENT(4);
 	c->clientid = GET_32BIT_MSB_FIRST(c->xrecordbuf + 16);
 
 	/*
@@ -4218,10 +4429,126 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	x11_send(c->xs, buf, 8);
 
 	/*
-	 * FIXME: now we must fiddle about some more, because the
-	 * window id we've retrieved was almost certainly owned by
-	 * the WM rather than by some actual client.
+	 * The window id we've retrieved was almost certainly owned
+	 * by the WM rather than by some actual client. So now we
+	 * must search down the tree of its child windows until we
+	 * find one which has a WM_STATE property (meaning that the
+	 * window manager has marked it as a top-level client
+	 * window).
+	 *
+	 * We do this in breadth-first order, partly because
+	 * managing a queue is marginally easier in a coroutine of
+	 * this type than managing a recursion, but mostly because
+	 * it seems like a more sensible order to avoid getting too
+	 * bogged down in any complicated window furniture we might
+	 * encounter before the real client window.
 	 */
+
+	/*
+	 * Start by finding the WM_STATE atom.
+	 */
+	buf[0] = 16;		       /* InternAtom opcode */
+	buf[1] = 1;		       /* don't create the WM_STATE atom */
+	PUT_16BIT_MSB_FIRST(buf+2, 4); /* request length */
+	PUT_16BIT_MSB_FIRST(buf+4, 8); /* name length */
+	PUT_16BIT_MSB_FIRST(buf+6, 0); /* padding */
+	memcpy(buf+8, "WM_STATE", 8);  /* name */
+	x11_send(c->xs, buf, 16);
+	do {
+	    read(c, xrecord, 32);
+	    if (c->xrecordbuf[0] == 1)
+		readfrom(c, xrecord,
+			 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	} while (c->xrecordbuf[0] > 1);/* ignore events */
+	EXPECT_REPLY("InternAtom");
+	c->wmsatom = GET_32BIT_MSB_FIRST(c->xrecordbuf + 8);
+	if (!c->wmsatom) {
+	    /*
+	     * The WM_STATE atom is not understood by the server at
+	     * all, which certainly means no window will have a
+	     * property by that name. In this situation (similarly
+	     * to if we do not find a WM_STATE-marked window at all)
+	     * we return the window we started with. Presumably, in
+	     * this situation, no window manager is running at all,
+	     * or if it is it's an odd one.
+	     */
+	    break;
+	}
+
+	c->whead = c->wtail = snew(struct winq);
+	c->whead->winid = c->clientid;
+	c->whead->next = NULL;
+	while (c->whead) {
+	    /*
+	     * Query the WM_STATE property on the window.
+	     */
+	    buf[0] = 20;	       /* GetProperty opcode */
+	    buf[1] = 0;		       /* do not delete the property! */
+	    PUT_16BIT_MSB_FIRST(buf+2, 6); /* request length */
+	    PUT_32BIT_MSB_FIRST(buf+4, c->whead->winid); /* window */
+	    PUT_32BIT_MSB_FIRST(buf+8, c->wmsatom); /* property ("WM_STATE") */
+	    PUT_32BIT_MSB_FIRST(buf+12, 0); /* type (AnyPropertyType) */
+	    PUT_32BIT_MSB_FIRST(buf+16, 0); /* long-offset */
+	    PUT_32BIT_MSB_FIRST(buf+20, 0); /* long-length */
+	    x11_send(c->xs, buf, 24);
+	    do {
+		read(c, xrecord, 32);
+		if (c->xrecordbuf[0] == 1)
+		    readfrom(c, xrecord,
+			     32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	    } while (c->xrecordbuf[0] > 1);/* ignore events */
+	    EXPECT_REPLY("GetProperty");
+	    if (GET_32BIT_MSB_FIRST(c->xrecordbuf+8) != 0) {
+		/*
+		 * Found it!
+		 */
+		c->clientid = c->whead->winid;
+		while (c->whead) {
+		    struct winq *next = c->whead->next;
+		    sfree(c->whead);
+		    c->whead = next;
+		}
+		c->whead = c->wtail = NULL;
+		break;
+	    }
+
+	    /*
+	     * This wasn't the droid^Wwindow we're looking for. Get
+	     * a list of its child windows, and add them to the
+	     * queue.
+	     */
+	    buf[0] = 15; buf[1] = 0;   /* QueryTree opcode and padding */
+	    PUT_16BIT_MSB_FIRST(buf+2, 2); /* request length */
+	    PUT_32BIT_MSB_FIRST(buf+4, c->whead->winid); /* window */
+	    x11_send(c->xs, buf, 8);
+	    do {
+		read(c, xrecord, 32);
+		if (c->xrecordbuf[0] == 1)
+		    readfrom(c, xrecord,
+			     32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	    } while (c->xrecordbuf[0] > 1);/* ignore events */
+	    EXPECT_REPLY("QueryTree");
+	    {
+		int i, n = GET_16BIT_MSB_FIRST(c->xrecordbuf + 16);
+		if (n > (c->xrecordlen - 32) / 4)
+		    n = (c->xrecordlen - 32) / 4;   /* buffer overrun check */
+		for (i = 0; i < n; i++) {
+		    c->wtail->next = snew(struct winq);
+		    c->wtail = c->wtail->next;
+		    c->wtail->next = NULL;
+		    c->wtail->winid =
+			GET_32BIT_MSB_FIRST(c->xrecordbuf + 32 + 4*i);
+		}
+	    }
+	    /*
+	     * And now dequeue the window we've just processed.
+	     */
+	    {
+		struct winq *old = c->whead;
+		c->whead = c->whead->next;
+		sfree(old);
+	    }
+	}
     }
 
     /*
@@ -4261,18 +4588,12 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
      * that last request.
      */
     while (1) {
-	read(c, xrecord, 32);
-	if (c->xrecordbuf[0] == 1)
-	    readfrom(c, xrecord,
-		 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
-	if ((c->xrecordbuf[0] & 0x7F) == 4) {
-	    /*
-	     * Another ButtonPress event, probably sent to us after
-	     * the one we received above but before we managed to
-	     * ungrab the pointer. Ignore it.
-	     */
-	    continue;
-	}
+	do {
+	    read(c, xrecord, 32);
+	    if (c->xrecordbuf[0] == 1)
+		readfrom(c, xrecord,
+			 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	} while (c->xrecordbuf[0] > 1);/* ignore events */
 	if (c->xrecordbuf[0] != 1) {
 	    fprintf(stderr, "FIXME: proper error [expected recorded data]\n");
 	    exit(1);
@@ -4329,7 +4650,8 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	     */
 	    exit(0);
 	  default:
-	    fprintf(stderr, "FIXME: proper error [unexpected data record]\n");
+	    fprintf(stderr, "xtrace: unexpected data record type received "
+		    "(%d)\n", c->xrecordbuf[1]);
 	    break;
 	}
     }
