@@ -454,6 +454,7 @@ enum {
     STRING,
     HEXSTRING,
     HEXSTRING2,
+    HEXSTRING2B,
     HEXSTRING4,
     SETBEGIN,
     NOTHING,
@@ -501,6 +502,20 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 	    sep = "";
 	    while (ival-- > 0) {
 		unsigned val = READ16(sval);
+		xlog_printf(xl, "%s%04X", sep, val);
+		sval += 2;
+		sep = ":";
+	    }
+	    break;
+	  case HEXSTRING2B:
+	    /* Fixed big-endian variant of HEXSTRING2, used for CHAR2B
+	     * strings which are nominally pairs of bytes rather than
+	     * 16-bit integers. */
+	    ival = va_arg(ap, int);
+	    sval = va_arg(ap, const char *);
+	    sep = "";
+	    while (ival-- > 0) {
+		unsigned val = GET_16BIT_MSB_FIRST(sval);
 		xlog_printf(xl, "%s%04X", sep, val);
 		sval += 2;
 		sep = ":";
@@ -1849,7 +1864,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		stringlen--;
 	    if (stringlen < 0)
 		stringlen = 0;
-	    xlog_param(xl, "string", HEXSTRING2, stringlen,
+	    xlog_param(xl, "string", HEXSTRING2B, stringlen,
 		       STRING(data, 8, 2*stringlen));
 	}
 	req->replies = 1;
@@ -2460,7 +2475,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		} else {
 		    xlog_param(xl, "delta", DEC8,
 			       FETCH8(data, pos+1));
-		    xlog_param(xl, "string", HEXSTRING2, tilen,
+		    xlog_param(xl, "string", HEXSTRING2B, tilen,
 			       STRING(data, pos+2, 2*tilen));
 		    pos += 2*tilen + 2;
 		}
@@ -2485,7 +2500,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 14));
-	xlog_param(xl, "string", HEXSTRING2, FETCH8(data, 1),
+	xlog_param(xl, "string", HEXSTRING2B, FETCH8(data, 1),
 		   STRING(data, 16, 2*FETCH8(data, 1)));
 	break;
       case 78:
