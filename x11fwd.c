@@ -34,7 +34,7 @@ struct X11Private {
     char *auth_protocol;
     unsigned char *auth_data;
     int data_read, auth_plen, auth_psize, auth_dlen, auth_dsize;
-    int verified;
+    int verified, need_auth;
     int throttled, throttle_override;
     unsigned long peer_ip;
     int peer_port;
@@ -559,7 +559,7 @@ int x11_get_screen_number(char *display)
  */
 extern const char *x11_init(Socket *s, struct X11Display *disp, void *c,
 			    const char *peeraddr, int peerport,
-			    const Config *cfg)
+			    const Config *cfg, int need_auth)
 {
     static const struct plug_function_table fn_table = {
 	x11_log,
@@ -580,6 +580,7 @@ extern const char *x11_init(Socket *s, struct X11Display *disp, void *c,
     pr->auth_protocol = NULL;
     pr->disp = disp;
     pr->verified = 0;
+    pr->need_auth = need_auth;
     pr->data_read = 0;
     pr->throttled = pr->throttle_override = 0;
     pr->c = c;
@@ -696,38 +697,40 @@ int x11_send(Socket s, char *data, int len)
      * If we haven't verified the authorisation, do so now.
      */
     if (!pr->verified) {
-	char *err;
+	if (pr->need_auth) {
+	    char *err;
 
-	pr->auth_protocol[pr->auth_plen] = '\0';	/* ASCIZ */
-	err = x11_verify(pr->peer_ip, pr->peer_port,
-			 pr->disp, pr->auth_protocol,
-			 pr->auth_data, pr->auth_dlen);
+	    pr->auth_protocol[pr->auth_plen] = '\0';	/* ASCIZ */
+	    err = x11_verify(pr->peer_ip, pr->peer_port,
+			     pr->disp, pr->auth_protocol,
+			     pr->auth_data, pr->auth_dlen);
 
-	/*
-	 * If authorisation failed, construct and send an error
-	 * packet, then terminate the connection.
-	 */
-	if (err) {
-	    char *message;
-	    int msglen, msgsize;
-	    unsigned char *reply;
+	    /*
+	     * If authorisation failed, construct and send an error
+	     * packet, then terminate the connection.
+	     */
+	    if (err) {
+		char *message;
+		int msglen, msgsize;
+		unsigned char *reply;
 
-	    message = dupprintf("%s X11 proxy: %s", appname, err);
-	    msglen = strlen(message);
-	    reply = snewn(8 + msglen+1 + 4, unsigned char); /* include zero */
-	    msgsize = (msglen + 3) & ~3;
-	    reply[0] = 0;	       /* failure */
-	    reply[1] = msglen;	       /* length of reason string */
-	    memcpy(reply + 2, pr->firstpkt + 2, 4);	/* major/minor proto vsn */
-	    PUT_16BIT(pr->firstpkt[0], reply + 6, msgsize >> 2);/* data len */
-	    memset(reply + 8, 0, msgsize);
-	    memcpy(reply + 8, message, msglen);
-	    sshfwd_write(pr->c, (char *)reply, 8 + msgsize);
-	    sshfwd_close(pr->c);
-	    x11_close(s);
-	    sfree(reply);
-	    sfree(message);
-	    return 0;
+		message = dupprintf("%s X11 proxy: %s", appname, err);
+		msglen = strlen(message);
+		reply = snewn(8 + msglen+1 + 4, unsigned char); /* include zero */
+		msgsize = (msglen + 3) & ~3;
+		reply[0] = 0;	       /* failure */
+		reply[1] = msglen;	       /* length of reason string */
+		memcpy(reply + 2, pr->firstpkt + 2, 4);	/* major/minor proto vsn */
+		PUT_16BIT(pr->firstpkt[0], reply + 6, msgsize >> 2);/* data len */
+		memset(reply + 8, 0, msgsize);
+		memcpy(reply + 8, message, msglen);
+		sshfwd_write(pr->c, (char *)reply, 8 + msgsize);
+		sshfwd_close(pr->c);
+		x11_close(s);
+		sfree(reply);
+		sfree(message);
+		return 0;
+	    }
 	}
 
 	/*

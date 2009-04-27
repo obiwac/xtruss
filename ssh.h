@@ -381,7 +381,7 @@ extern struct X11Display *x11_setup_display(char *display, int authtype,
 					    const Config *);
 void x11_free_display(struct X11Display *disp);
 extern const char *x11_init(Socket *, struct X11Display *, void *,
-			    const char *, int, const Config *);
+			    const char *, int, const Config *, int);
 extern void x11_close(Socket);
 extern int x11_send(Socket, char *, int);
 extern void x11_unthrottle(Socket s);
