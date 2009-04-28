@@ -56,12 +56,6 @@
  * 	 the first incoming connection and just proxy the rest
  * 	 untraced?
  *
- *  - Support the actual format change in the BIG-REQUESTS
- *    extension, since it affects the basic protocol structure and
- *    so we will be completely confused if anyone ever uses it in
- *    anger. (And Xlib always turns it on, so one has to assume that
- *    eventually it will have occasion to use it.)
- *
  *  - Rethink the centralised handling of sequence numbers in the
  *    s2c stream parser. Since KeymapNotify hasn't got one,
  *    extension-generated events we don't understand might not have
@@ -4024,8 +4018,32 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
     while (1) {
 	read(xl, c2s, 4);
 	i = READ16(xl->c2sbuf + 2);
-	readfrom(xl, c2s, i*4, 4);
-	xlog_do_request(xl, xl->c2sbuf, xl->c2slen);
+	if (i == 0) {
+	    /*
+	     * A zero length field means an extended request packet,
+	     * via the BIG-REQUESTS protocol extension. We must be
+	     * prepared to cope with big requests at all times: it
+	     * can't be conditional on having seen a BigReqEnable,
+	     * because in -p mode we might have tuned in after that
+	     * went past.
+	     */
+	    readfrom(xl, c2s, 8, 4);
+	    i = READ32(xl->c2sbuf + 4);
+	    readfrom(xl, c2s, i*4, 8);
+	    /*
+	     * Shift the first four bytes of the packet upwards, so
+	     * as to remove the inserted extra length word. Then
+	     * pass on to xlog_do_request() as usual, which won't
+	     * mind the length field in the packet data it sees
+	     * being zero because we're passing the real length as a
+	     * separate parameter and it will look at that instead.
+	     */
+	    memcpy(xl->c2sbuf + 4, xl->c2sbuf, 4);
+	    xlog_do_request(xl, xl->c2sbuf + 4, xl->c2slen - 4);
+	} else {
+	    readfrom(xl, c2s, i*4, 4);
+	    xlog_do_request(xl, xl->c2sbuf, xl->c2slen);
+	}
     }
 
     crFinish;
