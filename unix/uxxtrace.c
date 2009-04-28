@@ -56,37 +56,11 @@
  * 	 the first incoming connection and just proxy the rest
  * 	 untraced?
  *
- *  - Expand the extension tracking to make it recognise some set of
- *    extensions we actually know how to decode:
- *     * define our own numeric codes for extensions we know about,
- * 	 each one with its bottom 8 bits clear
- *     * have arrays in xl parallel to extreqs,exterrors,extevents
- * 	 which map major request opcodes to extension ids and map
- * 	 error codes and event codes to (extension-id | index). Set
- * 	 these up when receiving a QueryExtension reply for an
- * 	 extension we understand. (For the error and event code
- * 	 tables, we fill in multiple entries if the extension
- * 	 defines multiple events and errors.)
- *     * then when we're looking up a request, the first thing we
- * 	 can do is to check to see if the major opcode corresponds
- * 	 to a recognised extension, and if so replace it with
- * 	 extension-id | minor_opcode; and when looking up an event
- * 	 or error, we replace it with the item at that position in
- * 	 the appropriate lookup table if there is one. Then we can
- * 	 just add elements to our existing switches to format the
- * 	 extension-specific protocol elements.
- *     * We'll also need to figure out what to do about the -p mode,
- * 	 in which we'll inevitably see extension data going past for
- * 	 which we didn't tune in early enough to see the
- * 	 QueryExtension. Querying all the extensions in our control
- * 	 connection before we start sounds like the only sensible
- * 	 answer.
- *
- *  - Support at the very least the BIG-REQUESTS extension, since it
- *    affects the basic protocol structure and so we will be
- *    completely confused if anyone ever uses it in anger. (And Xlib
- *    always turns it on, so one has to assume that eventually it
- *    will have occasion to use it.)
+ *  - Support the actual format change in the BIG-REQUESTS
+ *    extension, since it affects the basic protocol structure and
+ *    so we will be completely confused if anyone ever uses it in
+ *    anger. (And Xlib always turns it on, so one has to assume that
+ *    eventually it will have occasion to use it.)
  *
  *  - Rethink the centralised handling of sequence numbers in the
  *    s2c stream parser. Since KeymapNotify hasn't got one,
@@ -112,6 +86,24 @@
  * 	 pretend to be a tarball of just xtrace...
  *
  * Possibly TODO:
+ *
+ *  - Decode more extensions.
+ *
+ *  - Work out what to do about extension tracking in -p mode.
+ *     * The only thing I can think of at the moment is for our
+ * 	 control connection to do a ListExtensions and then lots of
+ * 	 QueryExtension before we even attach to the target client.
+ *     * But are we guaranteed that extension opcode indices will be
+ * 	 the same between all client connections? It'd certainly be
+ * 	 the _obvious_ way to implement an X server, but I don't
+ * 	 think anything in the protocol specifically requires it.
+ * 	 Another thing a server might choose to do would be to
+ * 	 allocate extension number-space sequentially from the base
+ * 	 but independently for each client connection, and translate
+ * 	 the event numbers in SendEvents between clients. The
+ * 	 advantage of doing this would be that the server could
+ * 	 support more extensions than fit into the number space, and
+ * 	 each client could use any subset of them that _would_ fit.
  *
  *  - Command-line-configurable display format: be able to omit
  *    parameter names for expert users?
@@ -209,6 +201,33 @@ const char *const appname = "xtrace";
  * within an X connection.
  */
 
+/*
+ * Parametric macro defining each known extension as an internal
+ * identifier, its protocol-level string id, and the number of
+ * errors and events it defines.
+ */
+#define KNOWNEXTENSIONS(X) \
+    X(EXT_BIGREQUESTS, "BIG-REQUESTS", 0, 0)
+
+/*
+ * Define the EXT_* ids as a series of values with the low 8 bits
+ * clear.
+ */
+#define EXTENUM(e,s,er,ev) dummy1##e, dummy2##e = dummy1##e+0xFE, e,
+enum { dummy_min_ext = 0, KNOWNEXTENSIONS(EXTENUM) dummy_max_ext };
+
+/*
+ * Declare arrays such that extnumerrors[ext>>8] and
+ * extnumevents[ext>>8] give the number of errors and events defined
+ * by each known extension, and extname[ext>>8] gives its name.
+ */
+#define EXTNAME(e,s,er,ev) s
+const char *const extname[] = { NULL, KNOWNEXTENSIONS(EXTNAME) };
+#define EXTERRORS(e,s,er,ev) er
+const int extnumerrors[] = { 0, KNOWNEXTENSIONS(EXTERRORS) };
+#define EXTEVENTS(e,s,er,ev) ev
+const int extnumevents[] = { 0, KNOWNEXTENSIONS(EXTEVENTS) };
+
 struct request {
     struct request *next, *prev;
     int opcode;
@@ -238,11 +257,12 @@ struct request {
     int first_keycode, keycode_count;  /* for GetKeyboardMapping */
 
     /*
-     * Machine-readable representation of the extension name seen in
-     * a QueryExtension, so that when we get its details back we can
+     * Machine-readable representation of the extension seen in a
+     * QueryExtension, so that when we get its details back we can
      * start logging requests as belonging to that extension.
      */
     char *extname;
+    int extid;
 };
 
 /*
@@ -273,6 +293,9 @@ struct xlog {
     char *extreqs[128];      /* extension name for each >=128 request opcode */
     char *extevents[128];    /* name of extension based at a given event */
     char *exterrors[256];    /* name of extension based at a given error */
+    int extidreqs[128];		       /* our extension ids */
+    int extidevents[128];
+    int extiderrors[256];
     int endianness;
     int error;
     int reqlogstate;
@@ -300,11 +323,11 @@ struct xlog *xlog_new(int type)
     xl->nextseq = 1;
     xl->type = type;
     for (i = 0; i < 128; i++)
-	xl->extreqs[i] = NULL;
+	xl->extreqs[i] = NULL, xl->extidreqs[i] = 0;
     for (i = 0; i < 128; i++)
-	xl->extevents[i] = NULL;
+	xl->extevents[i] = NULL, xl->extidevents[i] = 0;
     for (i = 0; i < 256; i++)
-	xl->exterrors[i] = NULL;
+	xl->exterrors[i] = NULL, xl->extidevents[i] = 0;
     return xl;
 }
 
@@ -1059,6 +1082,9 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, "SendEvent-generated ");
 	event &= ~0x80;
     }
+    /* Translate events from extensions we know about */
+    if (xl->extidevents[event])
+	event = xl->extidevents[event];
     name = xlog_translate_event(event);
     if (name) {
 	xlog_printf(xl, "%s", name);
@@ -1412,6 +1438,15 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
     req->opcode = data[0];
     req->replies = 0;
     req->extname = NULL;
+    req->extid = 0;
+
+    /*
+     * Translate requests belonging to known extensions so we can
+     * switch on them.
+     */
+    if (req->opcode >= 128 && xl->extidreqs[req->opcode-128])
+	req->opcode = xl->extidreqs[req->opcode-128] | data[1];
+
     switch (req->opcode) {
       case 1:
       case 2:
@@ -2786,6 +2821,15 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   STRING(data, 8, FETCH16(data, 4)));
 	if (!xl->overflow)
 	    req->extname = dupprintf("%.*s", READ16(data+4), data+8);
+	{
+	    int i;
+	    for (i = 1; i < lenof(extname); i++) {
+		if (!strcmp(req->extname, extname[i])) {
+		    req->extid = i << 8;
+		    break;
+		}
+	    }
+	}
 	req->replies = 1;
 	break;
       case 99:
@@ -3002,11 +3046,15 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_request_name(xl, "GetModifierMapping");
 	req->replies = 1;
 	break;
-
       case 127:
-	/* FIXME: possibly we should not bother to log this by default? */
 	xlog_request_name(xl, "NoOperation");
 	break;
+
+      case EXT_BIGREQUESTS | 0:
+	xlog_request_name(xl, "BigReqEnable");
+	req->replies = 1;
+	break;
+
       default:
 	if (data[0] >= 128) {
 	    /*
@@ -3524,14 +3572,28 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	assert(req->extname);
 	if (!xl->overflow && FETCH8(data, 8)) {
 	    int opcode = FETCH8(data, 9) - 128;
-	    if (!xl->extreqs[opcode])
+	    if (!xl->extreqs[opcode]) {
 		xl->extreqs[opcode] = dupstr(req->extname);
+		xl->extidreqs[opcode] = req->extid;
+	    }
 	    opcode = FETCH8(data, 10);
-	    if (opcode < 128 && !xl->extevents[opcode])
+	    if (opcode < 128 && !xl->extevents[opcode]) {
 		xl->extevents[opcode] = dupstr(req->extname);
+		if (req->extid) {
+		    int i;
+		    for (i = 0; i < extnumevents[req->extid >> 8]; i++)
+			xl->extidevents[opcode + i] = req->extid | i;
+		}
+	    }
 	    opcode = FETCH8(data, 11);
-	    if (!xl->exterrors[opcode])
+	    if (!xl->exterrors[opcode]) {
 		xl->exterrors[opcode] = dupstr(req->extname);
+		if (req->extid) {
+		    int i;
+		    for (i = 0; i < extnumerrors[req->extid >> 8]; i++)
+			xl->extiderrors[opcode + i] = req->extid | i;
+		}
+	    }
 	}
 	break;
       case 99:
@@ -3680,6 +3742,13 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	    }
 	}
 	break;
+
+      case EXT_BIGREQUESTS | 0:
+	/* "BigReqEnable" */
+	xlog_param(xl, "maximum-request-length", DECU, FETCH32(data, 8));
+	
+	break;
+
       default:
 	xlog_printf(xl, "<unable to decode reply data>");
 	break;
@@ -3758,6 +3827,9 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     xl->reqlogstate = 3;	       /* for things with parameters */
 
     errcode = FETCH8(data, 1);
+    /* Translate errors from extensions we know about */
+    if (xl->extiderrors[errcode])
+	errcode = xl->extiderrors[errcode];
     error = xlog_translate_error(errcode);
     if (error)
 	xlog_printf(xl, "%s", error);
