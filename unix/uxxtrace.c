@@ -201,7 +201,8 @@ const char *const appname = "xtrace";
  * errors and events it defines.
  */
 #define KNOWNEXTENSIONS(X) \
-    X(EXT_BIGREQUESTS, "BIG-REQUESTS", 0, 0)
+    X(EXT_BIGREQUESTS, "BIG-REQUESTS", 0, 0) \
+    X(EXT_MITSHM, "MIT-SHM", 1, 1)
 
 /*
  * Define the EXT_* ids as a series of values with the low 8 bits
@@ -215,11 +216,11 @@ enum { dummy_min_ext = 0, KNOWNEXTENSIONS(EXTENUM) dummy_max_ext };
  * extnumevents[ext>>8] give the number of errors and events defined
  * by each known extension, and extname[ext>>8] gives its name.
  */
-#define EXTNAME(e,s,er,ev) s
+#define EXTNAME(e,s,er,ev) s,
 const char *const extname[] = { NULL, KNOWNEXTENSIONS(EXTNAME) };
-#define EXTERRORS(e,s,er,ev) er
+#define EXTERRORS(e,s,er,ev) er,
 const int extnumerrors[] = { 0, KNOWNEXTENSIONS(EXTERRORS) };
-#define EXTEVENTS(e,s,er,ev) ev
+#define EXTEVENTS(e,s,er,ev) ev,
 const int extnumevents[] = { 0, KNOWNEXTENSIONS(EXTEVENTS) };
 
 struct request {
@@ -1059,6 +1060,8 @@ const char *xlog_translate_event(int eventtype)
 	return "ClientMessage";
       case 34:
 	return "MappingNotify";
+      case EXT_MITSHM | 0:
+	return "ShmCompletion";
       default:
 	return NULL;
     }
@@ -1411,6 +1414,15 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_param(xl, "count", DECU, FETCH8(data, pos+6));
 	xlog_printf(xl, ")");
 	break;
+      case EXT_MITSHM | 0:
+	/* ShmCompletion */
+	xlog_printf(xl, "(");
+	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, pos+4));
+	xlog_param(xl, "shmseg", HEX32, FETCH32(data, pos+8));
+	xlog_param(xl, "minor-event", DECU, FETCH16(data, pos+12));
+	xlog_param(xl, "major-event", DECU, FETCH8(data, pos+14));
+	xlog_param(xl, "offset", HEX32, FETCH32(data, pos+16));
+	xlog_printf(xl, ")");
       default:
 	/* unknown event */
 	break;
@@ -3049,6 +3061,64 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
 
+      case EXT_MITSHM | 0:
+	xlog_request_name(xl, "ShmQueryVersion");
+	req->replies = 1;
+	break;
+      case EXT_MITSHM | 1:
+	xlog_request_name(xl, "ShmAttach");
+	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 4));
+	xlog_param(xl, "shmid", HEX32, FETCH32(data, 8));
+	xlog_param(xl, "read-only", BOOLEAN, FETCH8(data, 12));
+	break;
+      case EXT_MITSHM | 2:
+	xlog_request_name(xl, "ShmDetach");
+	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 4));
+	break;
+      case EXT_MITSHM | 3:
+	xlog_request_name(xl, "ShmPutImage");
+	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
+	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
+	xlog_param(xl, "total-width", DECU, FETCH16(data, 12));
+	xlog_param(xl, "total-height", DECU, FETCH16(data, 14));
+	xlog_param(xl, "src-x", DECU, FETCH16(data, 16));
+	xlog_param(xl, "src-y", DECU, FETCH16(data, 18));
+	xlog_param(xl, "src-width", DECU, FETCH16(data, 20));
+	xlog_param(xl, "src-height", DECU, FETCH16(data, 22));
+	xlog_param(xl, "dst-x", DEC16, FETCH16(data, 24));
+	xlog_param(xl, "dst-y", DEC16, FETCH16(data, 26));
+	xlog_param(xl, "depth", DECU, FETCH8(data, 28));
+	xlog_param(xl, "format", ENUM | SPECVAL, FETCH8(data, 29),
+		   "Bitmap", 0, "XYPixmap", 1, "ZPixmap", 2, (char *)NULL);
+	xlog_param(xl, "send-event", BOOLEAN, FETCH8(data, 30));
+	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 32));
+	xlog_param(xl, "offset", HEX32, FETCH32(data, 36));
+	break;
+      case EXT_MITSHM | 4:
+	xlog_request_name(xl, "ShmGetImage");
+	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
+	xlog_param(xl, "x", DEC16, FETCH16(data, 8));
+	xlog_param(xl, "y", DEC16, FETCH16(data, 10));
+	xlog_param(xl, "width", DECU, FETCH16(data, 12));
+	xlog_param(xl, "height", DECU, FETCH16(data, 14));
+	xlog_param(xl, "plane-mask", HEX32, FETCH32(data, 16));
+	xlog_param(xl, "format", ENUM | SPECVAL, FETCH8(data, 20),
+		   "Bitmap", 0, "XYPixmap", 1, "ZPixmap", 2, (char *)NULL);
+	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 24));
+	xlog_param(xl, "offset", HEX32, FETCH32(data, 28));
+	req->replies = 1;
+	break;
+      case EXT_MITSHM | 5:
+	xlog_request_name(xl, "ShmCreatePixmap");
+	xlog_param(xl, "pid", PIXMAP, FETCH32(data, 4));
+	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 8));
+	xlog_param(xl, "width", DECU, FETCH16(data, 12));
+	xlog_param(xl, "height", DECU, FETCH16(data, 14));
+	xlog_param(xl, "depth", DECU, FETCH8(data, 16));
+	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 20));
+	xlog_param(xl, "offset", HEX32, FETCH32(data, 24));
+	break;
+
       default:
 	if (data[0] >= 128) {
 	    /*
@@ -3738,9 +3808,25 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	break;
 
       case EXT_BIGREQUESTS | 0:
-	/* "BigReqEnable" */
+	/* BigReqEnable */
 	xlog_param(xl, "maximum-request-length", DECU, FETCH32(data, 8));
-	
+	break;
+
+      case EXT_MITSHM | 0:
+	/* ShmQueryVersion */
+	xlog_param(xl, "shared-pixmaps", BOOLEAN, FETCH8(data, 1));
+	xlog_param(xl, "major-version", DECU, FETCH16(data, 8));
+	xlog_param(xl, "minor-version", DECU, FETCH16(data, 10));
+	xlog_param(xl, "uid", DECU, FETCH16(data, 12));
+	xlog_param(xl, "gid", DECU, FETCH16(data, 14));
+	xlog_param(xl, "pixmap-format", ENUM | SPECVAL, FETCH8(data, 16),
+		   "Bitmap", 0, "XYPixmap", 1, "ZPixmap", 2, (char *)NULL);
+	break;
+      case EXT_MITSHM | 4:
+	/* ShmGetImage */
+	xlog_param(xl, "depth", DECU, FETCH8(data, 1));
+	xlog_param(xl, "visual", VISUALID, FETCH32(data, 8));
+	xlog_param(xl, "size", DECU, FETCH32(data, 12));
 	break;
 
       default:
@@ -3801,6 +3887,8 @@ const char *xlog_translate_error(int errcode)
 	return "BadLength";
       case 17:
 	return "BadImplementation";
+      case EXT_MITSHM | 0:
+	return "BadShmSeg";
       default:
 	return NULL;
     }
