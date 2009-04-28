@@ -1,22 +1,27 @@
 /*
  * xtrace: looks like strace, quacks like xmon.
  *
- * This is essentially a logging X11 proxy. It's based on the PuTTY
- * general network abstraction and X forwarding framework, so it
- * reuses PuTTY's code for replacing the X authorisation data at the
- * start of a forwarded connection. The effect of this is that it
- * can set up its proxy server with its own authorisation data, and
- * pass that to its client without being fundamentally unable to
- * handle complex authorisation methods that don't survive proxying
- * (e.g. XDM-AUTHORIZATION-1). Practical upshot: instead of having
- * to run the logging proxy in one terminal, set its authorisation
- * up painstakingly and then launch the program to be monitored with
- * carefully chosen environment variables, you just run 'xtrace
- * <program> <args>' in exactly the same way you would with strace,
- * and it Just Works.
+ * xtrace monitors the data sent and received between an X client
+ * and the X server, and logs it in a format reminiscent of Linux's
+ * strace(1). Its command-line syntax is also similar to strace: in
+ * the simplest invocation, you just run the target X program
+ * exactly as you normally would but prefix it with 'xtrace', e.g.
+ * 'xtrace xterm -fn 9x15'. If your X server supports the X RECORD
+ * extension, you can also attach xtrace to a client which is
+ * already running, by specifying an X resource id (similarly to
+ * xkill(1)) or by selecting a window interactively with the mouse.
  *
- * Additionally, the output is more like strace's format than
- * xmon's, which I for one find makes it much easier to read.
+ * I wrote it because xmon irritated me by not being enough like
+ * strace: a pain to set up (two confusingly cooperating processes,
+ * no automatic handling of authorisation for the proxy display) and
+ * unreadable in its output (half a screen per request or response,
+ * and no way to see at a glance what request a response was a reply
+ * to).
+ *
+ * This is a spinoff project from the PuTTY code base: the X proxy
+ * code reuses the X forwarding framework from PuTTY, because that
+ * provided for free all the code that invents of new authorisation
+ * data and checks and replaces it in the proxied connections.
  */
 
 /*
@@ -40,7 +45,8 @@
  *
  *  - Deal with interleaving log data from multiple clients:
  *     * identify clients by some sort of numeric id (resource-base
- * 	 is currently favourite)
+ * 	 is currently favourite, particularly since it's also the id
+ * 	 used by X RECORD so there's precedent)
  *     * when multiple clients appear, start prefixing every log
  * 	 line with the client id
  *     * log connects and disconnects
@@ -50,13 +56,37 @@
  * 	 the first incoming connection and just proxy the rest
  * 	 untraced?
  *
- *  - Track responses to QueryExtension and use them to decode any
- *    protocol extensions that we find useful. In particular, we
- *    must definitely support BIG-REQUESTS, since it affects the
- *    basic protocol structure and so we will be completely confused
- *    if anyone ever uses it in anger. (And Xlib always turns it on,
- *    so one has to assume that eventually it will have occasion to
- *    use it.)
+ *  - Expand the extension tracking to make it recognise some set of
+ *    extensions we actually know how to decode:
+ *     * define our own numeric codes for extensions we know about,
+ * 	 each one with its bottom 8 bits clear
+ *     * have arrays in xl parallel to extreqs,exterrors,extevents
+ * 	 which map major request opcodes to extension ids and map
+ * 	 error codes and event codes to (extension-id | index). Set
+ * 	 these up when receiving a QueryExtension reply for an
+ * 	 extension we understand. (For the error and event code
+ * 	 tables, we fill in multiple entries if the extension
+ * 	 defines multiple events and errors.)
+ *     * then when we're looking up a request, the first thing we
+ * 	 can do is to check to see if the major opcode corresponds
+ * 	 to a recognised extension, and if so replace it with
+ * 	 extension-id | minor_opcode; and when looking up an event
+ * 	 or error, we replace it with the item at that position in
+ * 	 the appropriate lookup table if there is one. Then we can
+ * 	 just add elements to our existing switches to format the
+ * 	 extension-specific protocol elements.
+ *     * We'll also need to figure out what to do about the -p mode,
+ * 	 in which we'll inevitably see extension data going past for
+ * 	 which we didn't tune in early enough to see the
+ * 	 QueryExtension. Querying all the extensions in our control
+ * 	 connection before we start sounds like the only sensible
+ * 	 answer.
+ *
+ *  - Support at the very least the BIG-REQUESTS extension, since it
+ *    affects the basic protocol structure and so we will be
+ *    completely confused if anyone ever uses it in anger. (And Xlib
+ *    always turns it on, so one has to assume that eventually it
+ *    will have occasion to use it.)
  *
  *  - Rethink the centralised handling of sequence numbers in the
  *    s2c stream parser. Since KeymapNotify hasn't got one,
@@ -66,9 +96,20 @@
  *    have that called as appropriate from all of xlog_do_reply,
  *    xlog_do_event and xlog_do_error.
  *
- *  - --help, --version, --licence. (Sort out the licence, actually.
- *    Probably not _everybody_ in the PuTTY LICENCE document holds
- *    copyright in the pieces I've reused here.)
+ *  - Stop defaulting to :0 in the absence of $DISPLAY!
+ *
+ *  - Pre-publication polishing:
+ *     * -display option.
+ *     * --help, --version, --licence. (Sort out the licence,
+ * 	 actually. Probably not _everybody_ in the PuTTY LICENCE
+ * 	 document holds copyright in the pieces I've reused here.
+ * 	 Also, possibly the authors of the X protocol hold some
+ * 	 copyright, since a lot of this code is transcribed straight
+ * 	 out of their definitions?)
+ *     * man page.
+ *     * figure out how to turn this sprawling directory full of
+ * 	 unused pieces of PuTTY into something that can convincingly
+ * 	 pretend to be a tarball of just xtrace...
  *
  * Possibly TODO:
  *
@@ -76,11 +117,17 @@
  *    parameter names for expert users?
  *
  *  - Command-line configurable display format: alternative methods
- *    of handling separated requests and responses?
+ *    of handling separated requests and responses? I definitely
+ *    like the one I've got now, but there's scope for others to be
+ *    selectable.
  *     * Such as, for instance, "Request(params) = <unfinished
- * 	 #xxxx>" followed by " ... <#xxxx> = {response}".
- *     * Or perhaps _always_ display the sequence number.
- *     * Perhaps even never combine request and response lines.
+ * 	 #xxxx>" followed by " ... <#xxxx> = {response}", which has
+ * 	 the virtue that it doesn't repeat enormous request lines in
+ * 	 the output.
+ *     * More radically than that, perhaps, never combine request
+ * 	 and response lines at all - just print a sequence number on
+ * 	 absolutely everything, and leave untangling it to the
+ * 	 reader.
  *
  *  - Prettyprinting of giant data structure returns, by inserting
  *    newlines and appropriate indentation?
@@ -116,6 +163,13 @@
  *  - Other strace-like output options, such as prefixed timestamps
  *    (-t, -tt, -ttt), alignment (-a), and more filtering options
  *    (-e).
+ *
+ *  - More xprop/xkill-like command line syntax for choosing a
+ *    client to trace via X RECORD? -id 0xXXX as a synonym for -p
+ *    XXX, for instance. Perhaps -name (for which we can reuse the
+ *    existing bfs loop to look for a window with the given WM_NAME
+ *    property). And should just 'xtrace' with no arguments work
+ *    like just 'xprop'?
  *
  *  - Find some way of independently testing the correctness of the
  *    vast amount of this program that I translated straight out of
@@ -182,6 +236,13 @@ struct request {
      * when the reply comes in.
      */
     int first_keycode, keycode_count;  /* for GetKeyboardMapping */
+
+    /*
+     * Machine-readable representation of the extension name seen in
+     * a QueryExtension, so that when we get its details back we can
+     * start logging requests as belonging to that extension.
+     */
+    char *extname;
 };
 
 /*
@@ -209,6 +270,9 @@ struct xlog {
     unsigned char *c2sbuf, *s2cbuf;
     int c2slen, c2slimit, c2ssize;
     int s2clen, s2climit, s2csize;
+    char *extreqs[128];      /* extension name for each >=128 request opcode */
+    char *extevents[128];    /* name of extension based at a given event */
+    char *exterrors[256];    /* name of extension based at a given error */
     int endianness;
     int error;
     int reqlogstate;
@@ -221,6 +285,7 @@ struct xlog {
 struct xlog *xlog_new(int type)
 {
     struct xlog *xl = snew(struct xlog);
+    int i;
     xl->endianness = -1;	       /* as-yet-unknown */
     xl->c2sbuf = NULL;
     xl->c2sstate = 0;
@@ -234,22 +299,36 @@ struct xlog *xlog_new(int type)
     xl->rhead = xl->rtail = NULL;
     xl->nextseq = 1;
     xl->type = type;
+    for (i = 0; i < 128; i++)
+	xl->extreqs[i] = NULL;
+    for (i = 0; i < 128; i++)
+	xl->extevents[i] = NULL;
+    for (i = 0; i < 256; i++)
+	xl->exterrors[i] = NULL;
     return xl;
 }
 
 void free_request(struct request *req)
 {
     sfree(req->text);
+    sfree(req->extname);
     sfree(req);
 }
 
 void xlog_free(struct xlog *xl)
 {
+    int i;
     while (xl->rhead) {
 	struct request *nexthead = xl->rhead->next;
 	free_request(xl->rhead);
 	xl->rhead = nexthead;
     }
+    for (i = 0; i < 128; i++)
+	sfree(xl->extreqs[i]);
+    for (i = 0; i < 128; i++)
+	sfree(xl->extevents[i]);
+    for (i = 0; i < 256; i++)
+	sfree(xl->exterrors[i]);
     sfree(xl->c2sbuf);
     sfree(xl->s2cbuf);
     sfree(xl->textbuf);
@@ -981,7 +1060,19 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	event &= ~0x80;
     }
     name = xlog_translate_event(event);
-    xlog_printf(xl, "%s", name);
+    if (name) {
+	xlog_printf(xl, "%s", name);
+    } else {
+	int i;
+	for (i = 0; event-i >= 0; i++)
+	    if (xl->extevents[event-i]) {
+		xlog_printf(xl, "%s:UnknownEvent%d",
+			    xl->extevents[event-i], i);
+		break;
+	    }
+	if (event-i < 0)
+	    xlog_printf(xl, "UnknownEvent%d");
+    }
     switch (event) {
       case 2: case 3: case 4: case 5: case 6: case 7: case 8:
 	/* KeyPress, KeyRelease, ButtonPress, ButtonRelease, MotionNotify,
@@ -1301,7 +1392,7 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_printf(xl, ")");
 	break;
       default:
-	xlog_printf(xl, "UnknownEvent%d", event);
+	/* unknown event */
 	break;
     }
 
@@ -1320,6 +1411,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 
     req->opcode = data[0];
     req->replies = 0;
+    req->extname = NULL;
     switch (req->opcode) {
       case 1:
       case 2:
@@ -2692,6 +2784,8 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "name", STRING,
 		   FETCH16(data, 4),
 		   STRING(data, 8, FETCH16(data, 4)));
+	if (!xl->overflow)
+	    req->extname = dupprintf("%.*s", READ16(data+4), data+8);
 	req->replies = 1;
 	break;
       case 99:
@@ -2914,7 +3008,22 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_request_name(xl, "NoOperation");
 	break;
       default:
-	{
+	if (data[0] >= 128) {
+	    /*
+	     * Extension opcode.
+	     */
+	    int opcode = data[0] - 128;
+	    char buf[64];
+	    if (xl->extreqs[opcode]) {
+		sprintf(buf, "%s:UnknownExtensionRequest%d",
+			xl->extreqs[opcode], data[1]);
+	    } else {
+		sprintf(buf, "%d:UnknownExtensionRequest%d",
+			data[0], data[1]);
+	    }
+	    xlog_request_name(xl, buf);
+	    xlog_param(xl, "bytes", DECU, len);
+	} else {
 	    char buf[64];
 	    sprintf(buf, "UnknownRequest%d", data[0]);
 	    xlog_request_name(xl, buf);
@@ -3412,7 +3521,18 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "major-opcode", DECU, FETCH8(data, 9));
 	xlog_param(xl, "first-event", DECU, FETCH8(data, 10));
 	xlog_param(xl, "first-error", DECU, FETCH8(data, 11));
-	/* FIXME: we should add to our list of known-extension opcodes */
+	assert(req->extname);
+	if (!xl->overflow && FETCH8(data, 8)) {
+	    int opcode = FETCH8(data, 9) - 128;
+	    if (!xl->extreqs[opcode])
+		xl->extreqs[opcode] = dupstr(req->extname);
+	    opcode = FETCH8(data, 10);
+	    if (opcode < 128 && !xl->extevents[opcode])
+		xl->extevents[opcode] = dupstr(req->extname);
+	    opcode = FETCH8(data, 11);
+	    if (!xl->exterrors[opcode])
+		xl->exterrors[opcode] = dupstr(req->extname);
+	}
 	break;
       case 99:
 	/* ListExtensions */
@@ -3641,8 +3761,17 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     error = xlog_translate_error(errcode);
     if (error)
 	xlog_printf(xl, "%s", error);
-    else
-	xlog_printf(xl, "UnknownError%d", errcode);
+    else {
+	int i;
+	for (i = 0; errcode-i >= 0; i++)
+	    if (xl->exterrors[errcode-i]) {
+		xlog_printf(xl, "%s:UnknownError%d",
+			    xl->exterrors[errcode-i], i);
+		break;
+	    }
+	if (errcode-i < 0)
+	    xlog_printf(xl, "UnknownError%d");
+    }
     switch (errcode) {
       case 1:
 	/* BadRequest */
