@@ -1,0 +1,31 @@
+README for the xtruss source code
+---------------------------------
+
+This is a rather disorganised source code directory, for which I can
+only apologise and plead that the program was thrown together in a
+hurry.
+
+Almost all the source files in here are lifted almost without change
+from the PuTTY source tree, because that already contained nearly
+all the code necessary to handle proxying of an X11 server, checking
+the authorisation in the incoming connections, and substituting the
+right authorisation for the outgoing connection to the master
+server; it only took about fifty lines of new code to make all of
+that talk to a local listening socket in place of incoming X
+forwarding channels of an SSH connection, and I had a ready-made X
+proxy to which all I had to do was add (a lot of) logging code.
+
+Little editing has been done to the files taken from PuTTY - a
+couple of necessary features added, but that's about it - as a
+result of which there are still huge amounts of PuTTY-like code in
+this directory that are unused by and irrelevant to xtruss, such as
+nearly all of the Config structure in putty.h, and a lot of the rest
+of putty.h (such as definitions of functions and global variables in
+source files that don't exist).
+
+The xtruss-specific code is in the single enormous file uxxtruss.c,
+which includes both the X11 protocol decoder, the main program and
+command-line processing, and the Unix-specific front end code that
+manipulates the environment, forks off subprocesses, creates files
+in /tmp and loops round on select() to handle multiple network
+connections.
