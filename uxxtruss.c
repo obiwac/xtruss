@@ -1,13 +1,13 @@
 /*
- * xtrace: looks like strace, quacks like xmon.
+ * xtruss: looks like strace, quacks like xmon.
  *
- * xtrace monitors the data sent and received between an X client
+ * xtruss monitors the data sent and received between an X client
  * and the X server, and logs it in a format reminiscent of Linux's
  * strace(1). Its command-line syntax is also similar to strace: in
  * the simplest invocation, you just run the target X program
- * exactly as you normally would but prefix it with 'xtrace', e.g.
- * 'xtrace xterm -fn 9x15'. If your X server supports the X RECORD
- * extension, you can also attach xtrace to a client which is
+ * exactly as you normally would but prefix it with 'xtruss', e.g.
+ * 'xtruss xterm -fn 9x15'. If your X server supports the X RECORD
+ * extension, you can also attach xtruss to a client which is
  * already running, by specifying an X resource id (similarly to
  * xkill(1)) or by selecting a window interactively with the mouse.
  *
@@ -20,68 +20,30 @@
  *
  * This is a spinoff project from the PuTTY code base: the X proxy
  * code reuses the X forwarding framework from PuTTY, because that
- * provided for free all the code that invents of new authorisation
+ * provided for free all the code that invents new authorisation
  * data and checks and replaces it in the proxied connections.
  */
 
 /*
  * Definitely TODO:
  *
- *  - Command-line-configurable filtering based on request and event
- *    types.
- *
- *  - Command-line-configurable suppression of really gigantic
- *    streams of data in protocol packets. (Probably a configurable
- *    limit, like strace -s.)
- *
- *  - Logging of at least some of the data from the server's welcome
- *    packet. Might be scope for making some of it optional, but
- *    certainly things like the root window ids would be useful for
- *    making sense of the subsequent proceedings.
- *
- *  - Figure out how to log the image data in PutImage requests and
- *    GetImage replies (the protocol spec isn't entirely clear how
- *    it should be interpreted).
- *
- *  - Deal with interleaving log data from multiple clients:
- *     * identify clients by some sort of numeric id (resource-base
- * 	 is currently favourite, particularly since it's also the id
- * 	 used by X RECORD so there's precedent)
- *     * when multiple clients appear, start prefixing every log
- * 	 line with the client id
- *     * log connects and disconnects
- *     * command-line option to request prefixing right from the
- * 	 start
- *     * perhaps a command-line option to request tracing of only
- * 	 the first incoming connection and just proxy the rest
- * 	 untraced?
- *
- *  - Rethink the centralised handling of sequence numbers in the
- *    s2c stream parser. Since KeymapNotify hasn't got one,
- *    extension-generated events we don't understand might not have
- *    one either, so perhaps it would be better to move that code
- *    out into a subfunction find_request_for_sequence_number() and
- *    have that called as appropriate from all of xlog_do_reply,
- *    xlog_do_event and xlog_do_error.
- *
- *  - Stop defaulting to :0 in the absence of $DISPLAY!
- *
  *  - Pre-publication polishing:
- *     * -display option.
- *     * --help, --version, --licence. (Sort out the licence,
- * 	 actually. Probably not _everybody_ in the PuTTY LICENCE
- * 	 document holds copyright in the pieces I've reused here.
- * 	 Also, possibly the authors of the X protocol hold some
- * 	 copyright, since a lot of this code is transcribed straight
- * 	 out of their definitions?)
- *     * man page.
  *     * figure out how to turn this sprawling directory full of
  * 	 unused pieces of PuTTY into something that can convincingly
- * 	 pretend to be a tarball of just xtrace...
+ * 	 pretend to be a tarball of just xtruss...
  *
  * Possibly TODO:
  *
+ *  - Arrange to let the network abstraction keep the peer address
+ *    of incoming connections, so that we can provide
+ *    XDM-AUTHORIZATION-1 on the proxy side at user request.
+ *
  *  - Decode more extensions.
+ *
+ *  - Log connection and disconnection of clients?
+ *
+ *  - Perhaps a command-line option to request tracing of only the
+ *    first incoming connection and just proxy the rest untraced?
  *
  *  - Work out what to do about extension tracking in -p mode.
  *     * The only thing I can think of at the moment is for our
@@ -143,23 +105,39 @@
  * 	    requests, but its effect on annotation of responses
  * 	    would have to be deferred until the sequence numbers in
  * 	    the response stream caught up with that request. Ick.
- * 	  + Perhaps in fact this is just a silly and overambitious
- * 	    idea and I'd be wiser not to try.
+ * 	  + Not to mention the fact that tracking active window ids
+ * 	    is _hard_: child windows are destroyed with their
+ * 	    parent, so you'd have to track window hierarchy too, and
+ * 	    worse still windows can be unilaterally reparented by
+ * 	    other clients so even that isn't reliable. Even Xlib
+ * 	    doesn't try to track active resource ids on the client
+ * 	    side, hence the XC-MISC extension to get back a chunk of
+ * 	    its id space when trivial sequential allocation runs
+ * 	    out.
+ * 	  + So perhaps in fact this is just a silly and
+ * 	    overambitious idea and I'd be wiser not to try.
  *
  *  - Other strace-like output options, such as prefixed timestamps
  *    (-t, -tt, -ttt), alignment (-a), and more filtering options
- *    (-e).
+ *    under -e (e.g. filter on particular resource ids? Though that
+ *    doesn't sound _obviously_ useful...).
  *
  *  - More xprop/xkill-like command line syntax for choosing a
  *    client to trace via X RECORD? -id 0xXXX as a synonym for -p
  *    XXX, for instance. Perhaps -name (for which we can reuse the
  *    existing bfs loop to look for a window with the given WM_NAME
- *    property). And should just 'xtrace' with no arguments work
+ *    property). And should just 'xtruss' with no arguments work
  *    like just 'xprop'?
  *
  *  - Find some way of independently testing the correctness of the
  *    vast amount of this program that I translated straight out of
  *    the X protocol specs...
+ *
+ *  - Ability to run as an explicit proxy, as other X tracing
+ *    utilities do. Run in this mode, xtruss should print the
+ *    appropriate DISPLAY and XAUTHORITY environment variables to
+ *    standard output in a form easily pasted into another shell
+ *    prompt, and then sit there waiting for connections.
  */
 
 #include <stdio.h>
@@ -185,15 +163,61 @@
 
 Config cfg;
 #define BUFLIMIT 16384
-enum { LOG_NONE, LOG_DIALOGUE, LOG_FILES };
-int logmode = LOG_NONE;
-int cindex = 0;
-const char *const appname = "xtrace";
+const char *const appname = "xtruss";
 
 /* ----------------------------------------------------------------------
  * Code to parse and log the data flowing (in both directions)
  * within an X connection.
  */
+
+int sizelimit = 256;
+int print_server_startup = FALSE;
+int raw_hex_dump = FALSE;
+int print_client_ids = FALSE;
+int num_clients_seen = 0;
+
+struct set {
+    tree234 *strings; /* sorted list of dynamically allocated "char *"s */
+    int include; /* whether the tree is things to include or exclude */
+} requests_to_log, events_to_log;
+
+int stringcmp(void *av, void *bv)
+{
+    const char *a = (const char *)av;
+    const char *b = (const char *)bv;
+    return strcmp(a, b);
+}
+
+int in_set(struct set *s, const char *string)
+{
+    int found = (find234(s->strings, (void *)string, NULL) != NULL);
+    if (s->include)
+	return found;
+    else
+	return !found;
+}
+
+/*
+ * Unusual 24-bit data marshalling macros, used for 24-bit bitmaps.
+ */
+#define GET_24BIT_LSB_FIRST(cp) \
+  (((unsigned long)(unsigned char)(cp)[0]) | \
+  ((unsigned long)(unsigned char)(cp)[1] << 8) | \
+  ((unsigned long)(unsigned char)(cp)[2] << 16))
+#define GET_24BIT_MSB_FIRST(cp) \
+  (((unsigned long)(unsigned char)(cp)[2]) | \
+  ((unsigned long)(unsigned char)(cp)[1] << 8) | \
+  ((unsigned long)(unsigned char)(cp)[0] << 16))
+
+/*
+ * Translate a bits-per-image-element count into an appropriate
+ * HEXSTRING* display data type.
+ */
+#define STRING_TYPE(byteorder, bits) ( \
+    (bits) == 32 ? (byteorder ? HEXSTRING4B : HEXSTRING4L) : \
+    (bits) == 24 ? (byteorder ? HEXSTRING3B : HEXSTRING3L) : \
+    (bits) == 16 ? (byteorder ? HEXSTRING2B : HEXSTRING2L) : \
+    HEXSTRING1)
 
 /*
  * Parametric macro defining each known extension as an internal
@@ -202,7 +226,8 @@ const char *const appname = "xtrace";
  */
 #define KNOWNEXTENSIONS(X) \
     X(EXT_BIGREQUESTS, "BIG-REQUESTS", 0, 0) \
-    X(EXT_MITSHM, "MIT-SHM", 1, 1)
+    X(EXT_MITSHM, "MIT-SHM", 1, 1) \
+    X(EXT_RENDER, "RENDER", 5, 0)
 
 /*
  * Define the EXT_* ids as a series of values with the low 8 bits
@@ -258,6 +283,15 @@ struct request {
      */
     char *extname;
     int extid;
+
+    /*
+     * Machine-readable representation of the pixmap parameters in a
+     * GetImage, so we can log the image data correctly when it
+     * comes back.
+     */
+    int pixmapformat, pixmapwidth, pixmapheight;
+
+    int printed;		       /* do we print this request at all? */
 };
 
 /*
@@ -278,6 +312,37 @@ static struct request *currreq = NULL;
  */
 static FILE *xlogfp;
 
+struct pixmapformat {
+    int depth, bits_per_pixel, scanline_pad;
+};
+
+struct resdepth {
+    unsigned long resource;
+    int depth;
+};
+static int resdepthcmp(void *av, void *bv)
+{
+    const struct resdepth *a = (const struct resdepth *)av;
+    const struct resdepth *b = (const struct resdepth *)bv;
+    if (a->resource < b->resource)
+	return -1;
+    else if (a->resource > b->resource)
+	return +1;
+    else
+	return 0;
+}
+static int resdepthfind(void *av, void *bv)
+{
+    const unsigned long *a = (const unsigned long *)av;
+    const struct resdepth *b = (const struct resdepth *)bv;
+    if (*a < b->resource)
+	return -1;
+    else if (*a > b->resource)
+	return +1;
+    else
+	return 0;
+}
+
 struct xlog {
     int c2sstate, s2cstate;
     char *textbuf;
@@ -285,6 +350,7 @@ struct xlog {
     unsigned char *c2sbuf, *s2cbuf;
     int c2slen, c2slimit, c2ssize;
     int s2clen, s2climit, s2csize;
+    unsigned c2soff, s2coff;
     char *extreqs[128];      /* extension name for each >=128 request opcode */
     char *extevents[128];    /* name of extension based at a given event */
     char *exterrors[256];    /* name of extension based at a given error */
@@ -297,7 +363,21 @@ struct xlog {
     int overflow;
     int nextseq;
     int type;
+    unsigned clientid;
     struct request *rhead, *rtail;
+    int bitmap_scanline_unit, bitmap_scanline_pad, image_byte_order;
+    struct pixmapformat *pixmapformats;
+    int npixmapformats;
+
+    /*
+     * Tree storing a mapping from X resource ids to image depths.
+     * This information has to be retained in order to correctly
+     * decode the RENDER extension request RenderAddGlyphs: we must
+     * remember the depth of every PICTFORMAT from the reply to
+     * RenderQueryPictFormats, and then remember the depth assigned
+     * to every GLYPHSET created.
+     */
+    tree234 *resdepths;
 };
 
 struct xlog *xlog_new(int type)
@@ -311,18 +391,22 @@ struct xlog *xlog_new(int type)
     xl->s2cbuf = NULL;
     xl->s2cstate = 0;
     xl->s2csize = 0;
+    xl->c2soff = xl->s2coff = 0;
     xl->error = FALSE;
     xl->textbuf = NULL;
     xl->textbuflen = xl->textbufsize = 0;
     xl->rhead = xl->rtail = NULL;
     xl->nextseq = 1;
     xl->type = type;
+    xl->clientid = 0xFFFFFFFFU;	       /* means 'unknown yet' */
     for (i = 0; i < 128; i++)
 	xl->extreqs[i] = NULL, xl->extidreqs[i] = 0;
     for (i = 0; i < 128; i++)
 	xl->extevents[i] = NULL, xl->extidevents[i] = 0;
     for (i = 0; i < 256; i++)
 	xl->exterrors[i] = NULL, xl->extidevents[i] = 0;
+    xl->pixmapformats = NULL;
+    xl->resdepths = newtree234(resdepthcmp);
     return xl;
 }
 
@@ -336,6 +420,10 @@ void free_request(struct request *req)
 void xlog_free(struct xlog *xl)
 {
     int i;
+    struct resdepth *gsd;
+    while ((gsd = delpos234(xl->resdepths, 0)) != NULL)
+	sfree(gsd);
+    freetree234(xl->resdepths);
     while (xl->rhead) {
 	struct request *nexthead = xl->rhead->next;
 	free_request(xl->rhead);
@@ -347,6 +435,7 @@ void xlog_free(struct xlog *xl)
 	sfree(xl->extevents[i]);
     for (i = 0; i < 256; i++)
 	sfree(xl->exterrors[i]);
+    sfree(xl->pixmapformats);
     sfree(xl->c2sbuf);
     sfree(xl->s2cbuf);
     sfree(xl->textbuf);
@@ -409,9 +498,28 @@ void xlog_free(struct xlog *xl)
 #define READ32(p) (xl->endianness == 'l' ? \
 		   GET_32BIT_LSB_FIRST(p) : GET_32BIT_MSB_FIRST(p))
 
+void xlog_new_line(struct xlog *xl)
+{
+    if (currreq) {
+	/* FIXME: in some modes we might wish to print the sequence number
+	 * here, which would be easy of course */
+	assert(currreq->printed);
+	fprintf(xlogfp, " = <unfinished>\n");
+	fflush(xlogfp);
+	currreq = NULL;
+    }
+    if (print_client_ids) {
+	if (xl->clientid == 0xFFFFFFFFU)
+	    fprintf(xlogfp, "new-conn: ");
+	else
+	    fprintf(xlogfp, "%08x: ", xl->clientid);
+    }
+}
+
 void xlog_error(struct xlog *xl, const char *fmt, ...)
 {
     va_list ap;
+    xlog_new_line(xl);
     fprintf(xlogfp, "protocol error: ");
     va_start(ap, fmt);
     vfprintf(xlogfp, fmt, ap);
@@ -507,9 +615,11 @@ static void writemask(struct xlog *xl, int ival, ...)
     va_end(ap);
 }
 
-void xlog_request_name(struct xlog *xl, const char *buf)
+void xlog_request_name(struct xlog *xl, struct request *req, const char *buf,
+		       int known)
 {
-    /* FIXME: filter logging of requests based on this name */
+    if (!in_set(&requests_to_log, known ? buf : "UnknownRequest"))
+	req->printed = FALSE;
     xlog_printf(xl, "%s", buf);
     xl->reqlogstate = 0;
 }
@@ -549,19 +659,31 @@ enum {
     GENMASK,
     ENUM,
     STRING,
-    HEXSTRING,
+    HEXSTRING1,
     HEXSTRING2,
+    HEXSTRING2L,
     HEXSTRING2B,
+    HEXSTRING3,
+    HEXSTRING3B,
+    HEXSTRING3L,
     HEXSTRING4,
+    HEXSTRING4B,
+    HEXSTRING4L,
     SETBEGIN,
     NOTHING,
+    NOTEVENEQUALSIGN,
+    PICTURE,			       /* RENDER extension */
+    PICTFORMAT,			       /* RENDER extension */
+    GLYPHSET,			       /* RENDER extension */
+    GLYPHABLE,			       /* RENDER extension */
+    FIXED,			       /* RENDER extension */
     SPECVAL = 0x8000
 };
 
 void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 {
     va_list ap;
-    const char *sval, *sep;
+    const char *sval, *sep, *trail;
     int ival, ival2;
 
     if (xl->reqlogstate == 0) {
@@ -577,57 +699,156 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 	xl->reqlogstate = 2;
     } else {
 	/* FIXME: perhaps optionally omit parameter names? */
-	xlog_printf(xl, "%s=", paramname);
+	xlog_text(xl, paramname);
+	if ((type &~ SPECVAL) != NOTEVENEQUALSIGN)
+	    xlog_text(xl, "=");
 	va_start(ap, type);
 	switch (type &~ SPECVAL) {
 	  case STRING:
 	    ival = va_arg(ap, int);
 	    sval = va_arg(ap, const char *);
+
+	    trail = "";
+	    if (sizelimit > 0 && xl->textbuflen + ival > sizelimit) {
+		int limitlen = sizelimit - xl->textbuflen;
+		if (limitlen < 20)
+		    limitlen = 20;
+		if (ival > limitlen) {
+		    ival = limitlen;
+		    trail = "...";
+		}
+	    }
+
 	    xlog_text(xl, "\"");
 	    print_c_string(xl, sval, ival);
-	    xlog_text(xl, "\"");
+	    xlog_printf(xl, "\"%s", trail);
 	    break;
-	  case HEXSTRING:
+	  case HEXSTRING1:
 	    ival = va_arg(ap, int);
 	    sval = va_arg(ap, const char *);
-	    while (ival-- > 0)
-		xlog_printf(xl, "%02X", (unsigned char)(*sval++));
+
+	    trail = "";
+	    if (sizelimit > 0 && xl->textbuflen + 3*ival-1 > sizelimit) {
+		int limitlen = (sizelimit - xl->textbuflen + 1) / 3;
+		if (limitlen < 8)
+		    limitlen = 8;
+		if (ival > limitlen) {
+		    ival = limitlen;
+		    trail = "...";
+		}
+	    }
+
+	    sep = "";
+	    while (ival-- > 0) {
+		unsigned val = 0xFF & *sval;
+		xlog_printf(xl, "%s%02X", sep, val);
+		sval++;
+		sep = ":";
+	    }
+	    if (*trail)
+		xlog_printf(xl, "%s%s", sep, trail);
 	    break;
 	  case HEXSTRING2:
-	    ival = va_arg(ap, int);
-	    sval = va_arg(ap, const char *);
-	    sep = "";
-	    while (ival-- > 0) {
-		unsigned val = READ16(sval);
-		xlog_printf(xl, "%s%04X", sep, val);
-		sval += 2;
-		sep = ":";
-	    }
-	    break;
 	  case HEXSTRING2B:
-	    /* Fixed big-endian variant of HEXSTRING2, used for CHAR2B
-	     * strings which are nominally pairs of bytes rather than
-	     * 16-bit integers. */
+	  case HEXSTRING2L:
+	    if (type == HEXSTRING2)
+		type = (xl->endianness == 'l' ? HEXSTRING2L : HEXSTRING2B);
+
 	    ival = va_arg(ap, int);
 	    sval = va_arg(ap, const char *);
+
+	    trail = "";
+	    if (sizelimit > 0 && xl->textbuflen + 5*ival-1 > sizelimit) {
+		int limitlen = (sizelimit - xl->textbuflen + 1) / 5;
+		if (limitlen < 4)
+		    limitlen = 4;
+		if (ival > limitlen) {
+		    ival = limitlen;
+		    trail = "...";
+		}
+	    }
+
 	    sep = "";
 	    while (ival-- > 0) {
-		unsigned val = GET_16BIT_MSB_FIRST(sval);
+		unsigned val;
+		if (type == HEXSTRING2L)
+		    val = GET_16BIT_LSB_FIRST(sval);
+		else
+		    val = GET_16BIT_MSB_FIRST(sval);
 		xlog_printf(xl, "%s%04X", sep, val);
 		sval += 2;
 		sep = ":";
 	    }
+	    if (*trail)
+		xlog_printf(xl, "%s%s", sep, trail);
+	    break;
+	  case HEXSTRING3:
+	  case HEXSTRING3B:
+	  case HEXSTRING3L:
+	    if (type == HEXSTRING3)
+		type = (xl->endianness == 'l' ? HEXSTRING3L : HEXSTRING3B);
+
+	    ival = va_arg(ap, int);
+	    sval = va_arg(ap, const char *);
+
+	    trail = "";
+	    if (sizelimit > 0 && xl->textbuflen + 7*ival-1 > sizelimit) {
+		int limitlen = (sizelimit - xl->textbuflen + 1) / 7;
+		if (limitlen < 2)
+		    limitlen = 2;
+		if (ival > limitlen) {
+		    ival = limitlen;
+		    trail = "...";
+		}
+	    }
+
+	    sep = "";
+	    while (ival-- > 0) {
+		unsigned val;
+		if (type == HEXSTRING3L)
+		    val = GET_24BIT_LSB_FIRST(sval);
+		else
+		    val = GET_24BIT_MSB_FIRST(sval);
+		xlog_printf(xl, "%s%06X", sep, val);
+		sval += 3;
+		sep = ":";
+	    }
+	    if (*trail)
+		xlog_printf(xl, "%s%s", sep, trail);
 	    break;
 	  case HEXSTRING4:
+	  case HEXSTRING4B:
+	  case HEXSTRING4L:
+	    if (type == HEXSTRING4)
+		type = (xl->endianness == 'l' ? HEXSTRING4L : HEXSTRING4B);
+
 	    ival = va_arg(ap, int);
 	    sval = va_arg(ap, const char *);
+
+	    trail = "";
+	    if (sizelimit > 0 && xl->textbuflen + 9*ival-1 > sizelimit) {
+		int limitlen = (sizelimit - xl->textbuflen + 1) / 9;
+		if (limitlen < 2)
+		    limitlen = 2;
+		if (ival > limitlen) {
+		    ival = limitlen;
+		    trail = "...";
+		}
+	    }
+
 	    sep = "";
 	    while (ival-- > 0) {
-		unsigned val = READ32(sval);
+		unsigned val;
+		if (type == HEXSTRING4L)
+		    val = GET_32BIT_LSB_FIRST(sval);
+		else
+		    val = GET_32BIT_MSB_FIRST(sval);
 		xlog_printf(xl, "%s%08X", sep, val);
 		sval += 4;
 		sep = ":";
 	    }
+	    if (*trail)
+		xlog_printf(xl, "%s%s", sep, trail);
 	    break;
 	  case SETBEGIN:
 	    /*
@@ -710,6 +931,14 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 	      case HEX32:
 		xlog_printf(xl, "0x%08X", ival);
 		break;
+	      case FIXED:
+#if UINT_MAX > 0xFFFFFFFF
+		ival &= 0xFFFFFFFF;
+		if (ival & 0x80000000)
+		    ival -= 0x100000000;
+#endif
+		xlog_printf(xl, "%.5f", ival / 65536.0);
+		break;
 	      case ENUM:
 		/* This type is used for values which are expected to
 		 * _always_ take one of their special values, so we
@@ -740,6 +969,15 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 	      case VISUALID:
 		xlog_printf(xl, "v#%08X", ival);
 		break;
+	      case PICTURE:
+		xlog_printf(xl, "pc#%08X", ival);
+		break;
+	      case PICTFORMAT:
+		xlog_printf(xl, "pf#%08X", ival);
+		break;
+	      case GLYPHSET:
+		xlog_printf(xl, "gs#%08X", ival);
+		break;
 	      case CURSOR:
 		/* Extra characters in the prefix distinguish from COLORMAP */
 		xlog_printf(xl, "cur#%08X", ival);
@@ -767,6 +1005,12 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 		 * _appropriate_ type prefix.
 		 */
 		xlog_printf(xl, "fg#%08X", ival);
+		break;
+	      case GLYPHABLE:
+		/*
+		 * GLYPHABLE can be FONTABLE or GLYPHSET. Sigh.
+		 */
+		xlog_printf(xl, "gsfg#%08X", ival);
 		break;
 	      case EVENTMASK:
 		writemask(xl, ival,
@@ -837,6 +1081,16 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
     }
 }
 
+int xlog_check_list_length(struct xlog *xl)
+{
+    if (sizelimit > 0 && xl->textbuflen > sizelimit) {
+	xlog_param(xl, "...", NOTEVENEQUALSIGN);
+	return TRUE;
+    }
+
+    return FALSE;
+}
+
 void xlog_set_end(struct xlog *xl)
 {
     xlog_text(xl, "}");
@@ -855,17 +1109,6 @@ void xlog_reply_end(struct xlog *xl)
     xlog_text(xl, "}");
 }
 
-void xlog_new_line(void)
-{
-    if (currreq) {
-	/* FIXME: in some modes we might wish to print the sequence number
-	 * here, which would be easy of course */
-	fprintf(xlogfp, " = <unfinished>\n");
-	fflush(xlogfp);
-	currreq = NULL;
-    }
-}
-
 void xlog_request_done(struct xlog *xl, struct request *req)
 {
     if (xl->reqlogstate)
@@ -882,38 +1125,43 @@ void xlog_request_done(struct xlog *xl, struct request *req)
     xl->nextseq = (xl->nextseq+1) & 0xFFFF;
     req->text = dupstr(xl->textbuf);
 
-    xlog_new_line();
-    if (req->replies) {
-	fprintf(xlogfp, "%s", req->text);
-	currreq = req;
-    } else {
-	fprintf(xlogfp, "%s\n", req->text);
+    if (req->printed) {
+	xlog_new_line(xl);
+	if (req->replies) {
+	    fprintf(xlogfp, "%s", req->text);
+	    currreq = req;
+	} else {
+	    fprintf(xlogfp, "%s\n", req->text);
+	}
+	fflush(xlogfp);
     }
-    fflush(xlogfp);
 }
 
 /* Indicate that we're about to print a response to a particular request */
-void xlog_respond_to(struct request *req)
+void xlog_respond_to(struct xlog *xl, struct request *req)
 {
+    if (!req->printed)
+	return;
+
     if (req != NULL && currreq == req) {
 	fprintf(xlogfp, " = ");
     } else {
-	if (currreq) {
-	    xlog_new_line();
-	    currreq = NULL;
-	}
+	xlog_new_line(xl);
 	if (req)
 	    fprintf(xlogfp, " ... %s = ", req->text);
 	else
 	    fprintf(xlogfp, "--- error received for unknown request: ");
     }
+    currreq = req;
 }
 
-void xlog_response_done(const char *text)
+void xlog_response_done(struct request *req, const char *text)
 {
-    fprintf(xlogfp, "%s\n", text);
+    if (!req || req->printed) {
+	fprintf(xlogfp, "%s\n", text);
+	fflush(xlogfp);
+    }
     currreq = NULL;
-    fflush(xlogfp);
 }
 
 void xlog_rectangle(struct xlog *xl, const unsigned char *data,
@@ -1067,7 +1315,8 @@ const char *xlog_translate_event(int eventtype)
     }
 }
 
-void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
+void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
+		int *filter)
 {
     int event;
     const char *name;
@@ -1084,9 +1333,13 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	event = xl->extidevents[event];
     name = xlog_translate_event(event);
     if (name) {
+	if (filter)
+	    *filter = in_set(&events_to_log, name);
 	xlog_printf(xl, "%s", name);
     } else {
 	int i;
+	if (filter)
+	    *filter = in_set(&events_to_log, "UnknownEvent");
 	for (i = 0; event-i >= 0; i++)
 	    if (xl->extevents[event-i]) {
 		xlog_printf(xl, "%s:UnknownEvent%d",
@@ -1156,6 +1409,8 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 		sprintf(buf, "keys[%d]", i);
 		xlog_param(xl, buf, HEX8, FETCH8(data, ppos));
 		ppos++;
+		if (i+1 < 32 && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	xlog_printf(xl, ")");
@@ -1402,7 +1657,7 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "type", ATOM, FETCH32(data, pos+8));
 	xlog_param(xl, "format", DECU, FETCH8(data, pos+1));
-	xlog_param(xl, "data", HEXSTRING, 20, STRING(data, pos+12, 20));
+	xlog_param(xl, "data", HEXSTRING1, 20, STRING(data, pos+12, 20));
 	xlog_printf(xl, ")");
 	break;
       case 34:
@@ -1431,6 +1686,60 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos)
     xl->reqlogstate = 1;
 }
 
+int xlog_image_data(struct xlog *xl, const char *paramname,
+		    const unsigned char *data, int len, int startoffset,
+		    int format, int width, int height, int depth)
+{
+    int bpp = -1, pad = -1, nbitmaps = 1;
+
+    /*
+     * Figure out the size and format of the image data, and
+     * log it as a hex string.
+     */
+    if (format == 2) {
+	/*
+	 * Z pixmap.
+	 */
+	int i;
+
+	for (i = 0; i < xl->npixmapformats; i++) {
+	    if (xl->pixmapformats[i].depth == depth) {
+		bpp = xl->pixmapformats[i].bits_per_pixel;
+		pad = xl->pixmapformats[i].scanline_pad;
+		break;
+	    }
+	}
+    } else {
+	bpp = xl->bitmap_scanline_unit;
+	pad = xl->bitmap_scanline_pad;
+	nbitmaps = depth;
+    }
+
+    if (bpp < 0) {
+	xlog_param(xl, "<unrecognised image depth>",
+		   NOTEVENEQUALSIGN);
+	return -1;
+    } else {
+	int scanlinewidth, unitsize, stringtype, nunits;
+
+	scanlinewidth = width;
+	scanlinewidth *= bpp;
+	scanlinewidth += pad - 1;
+	scanlinewidth &= ~(pad - 1);
+	scanlinewidth /= 8;
+
+	unitsize = (bpp + 7) / 8;
+	stringtype = STRING_TYPE(xl->image_byte_order, bpp);
+
+	nunits = (scanlinewidth / unitsize) * /* units/scanline */
+	    height * nbitmaps;  /* number of scanlines */
+
+	xlog_param(xl, paramname, stringtype, nunits,
+		   STRING(data, startoffset, nunits * unitsize));
+	return nunits * unitsize;
+    }
+}
+
 void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 {
     const unsigned char *data = (const unsigned char *)vdata;
@@ -1445,6 +1754,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
     req->replies = 0;
     req->extname = NULL;
     req->extid = 0;
+    req->printed = TRUE;
 
     /*
      * Translate requests belonging to known extensions so we can
@@ -1461,7 +1771,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 
 	    switch (data[0]) {
 	      case 1:
-		xlog_request_name(xl, "CreateWindow");
+		xlog_request_name(xl, req, "CreateWindow", TRUE);
 		xlog_param(xl, "wid", WINDOW, FETCH32(data, 4));
 		xlog_param(xl, "parent", WINDOW, FETCH32(data, 8));
 		xlog_param(xl, "class", ENUM | SPECVAL, FETCH16(data, 22),
@@ -1478,7 +1788,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		i = 32;
 		break;
 	      default /* case 2 */:
-		xlog_request_name(xl, "ChangeWindowAttributes");
+		xlog_request_name(xl, req, "ChangeWindowAttributes", TRUE);
 		xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 		i = 12;
 	    }
@@ -1594,49 +1904,49 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	}
 	break;
       case 3:
-	xlog_request_name(xl, "GetWindowAttributes");
+	xlog_request_name(xl, req, "GetWindowAttributes", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 4:
-	xlog_request_name(xl, "DestroyWindow");
+	xlog_request_name(xl, req, "DestroyWindow", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	break;
       case 5:
-	xlog_request_name(xl, "DestroySubwindows");
+	xlog_request_name(xl, req, "DestroySubwindows", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	break;
       case 6:
-	xlog_request_name(xl, "ChangeSaveSet");
+	xlog_request_name(xl, req, "ChangeSaveSet", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Insert", 0, "Delete", 1, (char *)NULL);
 	break;
       case 7:
-	xlog_request_name(xl, "ReparentWindow");
+	xlog_request_name(xl, req, "ReparentWindow", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "parent", WINDOW, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 14));
 	break;
       case 8:
-	xlog_request_name(xl, "MapWindow");
+	xlog_request_name(xl, req, "MapWindow", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	break;
       case 9:
-	xlog_request_name(xl, "MapSubwindows");
+	xlog_request_name(xl, req, "MapSubwindows", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	break;
       case 10:
-	xlog_request_name(xl, "UnmapWindow");
+	xlog_request_name(xl, req, "UnmapWindow", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	break;
       case 11:
-	xlog_request_name(xl, "UnmapSubwindows");
+	xlog_request_name(xl, req, "UnmapSubwindows", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	break;
       case 12:
-	xlog_request_name(xl, "ConfigureWindow");
+	xlog_request_name(xl, req, "ConfigureWindow", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	{
 	    unsigned i = 12;
@@ -1676,23 +1986,23 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	}
 	break;
       case 13:
-	xlog_request_name(xl, "CirculateWindow");
+	xlog_request_name(xl, req, "CirculateWindow", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "direction", ENUM | SPECVAL, FETCH8(data, 1),
 		   "RaiseLowest", 0, "LowerHighest", 1, (char *)NULL);
 	break;
       case 14:
-	xlog_request_name(xl, "GetGeometry");
+	xlog_request_name(xl, req, "GetGeometry", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 15:
-	xlog_request_name(xl, "QueryTree");
+	xlog_request_name(xl, req, "QueryTree", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 16:
-	xlog_request_name(xl, "InternAtom");
+	xlog_request_name(xl, req, "InternAtom", TRUE);
 	xlog_param(xl, "name", STRING,
 		   FETCH16(data, 4),
 		   STRING(data, 8, FETCH16(data, 4)));
@@ -1700,12 +2010,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 17:
-	xlog_request_name(xl, "GetAtomName");
+	xlog_request_name(xl, req, "GetAtomName", TRUE);
 	xlog_param(xl, "atom", ATOM, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 18:
-	xlog_request_name(xl, "ChangeProperty");
+	xlog_request_name(xl, req, "ChangeProperty", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "property", ATOM, FETCH32(data, 8));
 	xlog_param(xl, "type", ATOM, FETCH32(data, 12));
@@ -1732,12 +2042,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	}
 	break;
       case 19:
-	xlog_request_name(xl, "DeleteProperty");
+	xlog_request_name(xl, req, "DeleteProperty", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "property", ATOM, FETCH32(data, 8));
 	break;
       case 20:
-	xlog_request_name(xl, "GetProperty");
+	xlog_request_name(xl, req, "GetProperty", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "property", ATOM, FETCH32(data, 8));
 	xlog_param(xl, "type", ATOM | SPECVAL, FETCH32(data, 12),
@@ -1748,24 +2058,24 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 21:
-	xlog_request_name(xl, "ListProperties");
+	xlog_request_name(xl, req, "ListProperties", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 22:
-	xlog_request_name(xl, "SetSelectionOwner");
+	xlog_request_name(xl, req, "SetSelectionOwner", TRUE);
 	xlog_param(xl, "selection", ATOM, FETCH32(data, 8));
 	xlog_param(xl, "owner", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "time", HEX32 | SPECVAL, FETCH32(data, 12),
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 23:
-	xlog_request_name(xl, "GetSelectionOwner");
+	xlog_request_name(xl, req, "GetSelectionOwner", TRUE);
 	xlog_param(xl, "selection", ATOM, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 24:
-	xlog_request_name(xl, "ConvertSelection");
+	xlog_request_name(xl, req, "ConvertSelection", TRUE);
 	xlog_param(xl, "selection", ATOM, FETCH32(data, 8));
 	xlog_param(xl, "target", ATOM, FETCH32(data, 12));
 	xlog_param(xl, "property", ATOM, FETCH32(data, 16));
@@ -1774,17 +2084,17 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 25:
-	xlog_request_name(xl, "SendEvent");
+	xlog_request_name(xl, req, "SendEvent", TRUE);
 	xlog_param(xl, "destination", WINDOW | SPECVAL,
 		   FETCH32(data, 4),
 		   "PointerWindow", 0, "InputFocus", 1, (char *)NULL);
 	xlog_param(xl, "propagate", BOOLEAN, FETCH8(data, 1));
 	xlog_param(xl, "event-mask", EVENTMASK, FETCH32(data, 8));
 	xlog_param(xl, "event", NOTHING);
-	xlog_event(xl, data, len,  12);
+	xlog_event(xl, data, len,  12, NULL);
 	break;
       case 26:
-	xlog_request_name(xl, "GrabPointer");
+	xlog_request_name(xl, req, "GrabPointer", TRUE);
 	xlog_param(xl, "grab-window", WINDOW | SPECVAL,
 		   FETCH32(data, 4),
 		   "PointerWindow", 0, "InputFocus", 1, (char *)NULL);
@@ -1805,12 +2115,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 27:
-	xlog_request_name(xl, "UngrabPointer");
+	xlog_request_name(xl, req, "UngrabPointer", TRUE);
 	xlog_param(xl, "time", HEX32 | SPECVAL, FETCH32(data, 4),
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 28:
-	xlog_request_name(xl, "GrabButton");
+	xlog_request_name(xl, req, "GrabButton", TRUE);
 	xlog_param(xl, "modifiers", KEYMASK | SPECVAL,
 		   FETCH16(data, 22),
 		   "AnyModifier", 0x8000, (char *)NULL);
@@ -1833,7 +2143,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "None", 0, (char *)NULL);
 	break;
       case 29:
-	xlog_request_name(xl, "UngrabButton");
+	xlog_request_name(xl, req, "UngrabButton", TRUE);
 	xlog_param(xl, "modifiers", KEYMASK | SPECVAL,
 		   FETCH16(data, 8),
 		   "AnyModifier", 0x8000, (char *)NULL);
@@ -1844,7 +2154,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "PointerWindow", 0, "InputFocus", 1, (char *)NULL);
 	break;
       case 30:
-	xlog_request_name(xl, "ChangeActivePointerGrab");
+	xlog_request_name(xl, req, "ChangeActivePointerGrab", TRUE);
 	xlog_param(xl, "event-mask", EVENTMASK, FETCH16(data, 12));
 	xlog_param(xl, "cursor", CURSOR | SPECVAL, FETCH32(data, 4),
 		   "None", 0, (char *)NULL);
@@ -1852,7 +2162,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 31:
-	xlog_request_name(xl, "GrabKeyboard");
+	xlog_request_name(xl, req, "GrabKeyboard", TRUE);
 	xlog_param(xl, "grab-window", WINDOW | SPECVAL,
 		   FETCH32(data, 4),
 		   "PointerWindow", 0, "InputFocus", 1, (char *)NULL);
@@ -1868,12 +2178,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 32:
-	xlog_request_name(xl, "UngrabKeyboard");
+	xlog_request_name(xl, req, "UngrabKeyboard", TRUE);
 	xlog_param(xl, "time", HEX32 | SPECVAL, FETCH32(data, 4),
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 33:
-	xlog_request_name(xl, "GrabKey");
+	xlog_request_name(xl, req, "GrabKey", TRUE);
 	xlog_param(xl, "key", DECU | SPECVAL, FETCH8(data, 10),
 		   "AnyKey", 0, (char *)NULL);
 	xlog_param(xl, "modifiers", KEYMASK | SPECVAL,
@@ -1891,7 +2201,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "Synchronous", 0, "Asynchronous", 1, (char *)NULL);
 	break;
       case 34:
-	xlog_request_name(xl, "UngrabKey");
+	xlog_request_name(xl, req, "UngrabKey", TRUE);
 	xlog_param(xl, "key", DECU | SPECVAL, FETCH8(data, 1),
 		   "AnyKey", 0, (char *)NULL);
 	xlog_param(xl, "modifiers", KEYMASK | SPECVAL,
@@ -1902,7 +2212,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "PointerWindow", 0, "InputFocus", 1, (char *)NULL);
 	break;
       case 35:
-	xlog_request_name(xl, "AllowEvents");
+	xlog_request_name(xl, req, "AllowEvents", TRUE);
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "AsyncPointer", 0, "SyncPointer", 1,
 		   "ReplayPointe", 2, "AsyncKeyboard", 3,
@@ -1912,20 +2222,20 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 36:
-	xlog_request_name(xl, "GrabServer");
+	xlog_request_name(xl, req, "GrabServer", TRUE);
 	/* no arguments */
 	break;
       case 37:
-	xlog_request_name(xl, "UngrabServer");
+	xlog_request_name(xl, req, "UngrabServer", TRUE);
 	/* no arguments */
 	break;
       case 38:
-	xlog_request_name(xl, "QueryPointer");
+	xlog_request_name(xl, req, "QueryPointer", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 39:
-	xlog_request_name(xl, "GetMotionEvents");
+	xlog_request_name(xl, req, "GetMotionEvents", TRUE);
 	xlog_param(xl, "start", HEX32 | SPECVAL, FETCH32(data, 8),
 		   "CurrentTime", 0, (char *)NULL);
 	xlog_param(xl, "stop", HEX32 | SPECVAL, FETCH32(data, 12),
@@ -1934,7 +2244,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 40:
-	xlog_request_name(xl, "TranslateCoordinates");
+	xlog_request_name(xl, req, "TranslateCoordinates", TRUE);
 	xlog_param(xl, "src-window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "dst-window", WINDOW, FETCH32(data, 8));
 	xlog_param(xl, "src-x", DEC16, FETCH16(data, 12));
@@ -1942,7 +2252,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 41:
-	xlog_request_name(xl, "WarpPointer");
+	xlog_request_name(xl, req, "WarpPointer", TRUE);
 	xlog_param(xl, "src-window", WINDOW | SPECVAL,
 		   FETCH32(data, 4), "None", 0, (char *)NULL);
 	xlog_param(xl, "dst-window", WINDOW | SPECVAL,
@@ -1955,7 +2265,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "dst-y", DEC16, FETCH16(data, 22));
 	break;
       case 42:
-	xlog_request_name(xl, "SetInputFocus");
+	xlog_request_name(xl, req, "SetInputFocus", TRUE);
 	xlog_param(xl, "focus", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "revert-to", ENUM | SPECVAL, FETCH8(data, 1),
 		   "None", 0, "PointerRoot", 1, "Parent", 2,
@@ -1964,31 +2274,31 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "CurrentTime", 0, (char *)NULL);
 	break;
       case 43:
-	xlog_request_name(xl, "GetInputFocus");
+	xlog_request_name(xl, req, "GetInputFocus", TRUE);
 	req->replies = 1;
 	break;
       case 44:
-	xlog_request_name(xl, "QueryKeymap");
+	xlog_request_name(xl, req, "QueryKeymap", TRUE);
 	req->replies = 1;
 	break;
       case 45:
-	xlog_request_name(xl, "OpenFont");
+	xlog_request_name(xl, req, "OpenFont", TRUE);
 	xlog_param(xl, "fid", FONT, FETCH32(data, 4));
 	xlog_param(xl, "name", STRING,
 		   FETCH16(data, 8),
 		   STRING(data, 12, FETCH16(data, 8)));
 	break;
       case 46:
-	xlog_request_name(xl, "CloseFont");
+	xlog_request_name(xl, req, "CloseFont", TRUE);
 	xlog_param(xl, "font", FONT, FETCH32(data, 4));
 	break;
       case 47:
-	xlog_request_name(xl, "QueryFont");
+	xlog_request_name(xl, req, "QueryFont", TRUE);
 	xlog_param(xl, "font", FONTABLE, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 48:
-	xlog_request_name(xl, "QueryTextExtents");
+	xlog_request_name(xl, req, "QueryTextExtents", TRUE);
 	xlog_param(xl, "font", FONTABLE, FETCH32(data, 4));
 	{
 	    int stringlen = len - 8;
@@ -2003,7 +2313,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 49:
-	xlog_request_name(xl, "ListFonts");
+	xlog_request_name(xl, req, "ListFonts", TRUE);
 	xlog_param(xl, "pattern", STRING,
 		   FETCH16(data, 6),
 		   STRING(data, 8, FETCH16(data, 6)));
@@ -2011,7 +2321,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 50:
-	xlog_request_name(xl, "ListFontsWithInfo");
+	xlog_request_name(xl, req, "ListFontsWithInfo", TRUE);
 	xlog_param(xl, "pattern", STRING,
 		   FETCH16(data, 6),
 		   STRING(data, 8, FETCH16(data, 6)));
@@ -2019,7 +2329,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 2;		   /* this request expects multiple replies */
 	break;
       case 51:
-	xlog_request_name(xl, "SetFontPath");
+	xlog_request_name(xl, req, "SetFontPath", TRUE);
 	{
 	    int i, n;
 	    int pos = 8;
@@ -2032,15 +2342,17 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		slen = FETCH8(data, pos);
 		xlog_param(xl, buf, STRING, slen, STRING(data, pos+1, slen));
 		pos += slen + 1;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 52:
-	xlog_request_name(xl, "GetFontPath");
+	xlog_request_name(xl, req, "GetFontPath", TRUE);
 	req->replies = 1;
 	break;
       case 53:
-	xlog_request_name(xl, "CreatePixmap");
+	xlog_request_name(xl, req, "CreatePixmap", TRUE);
 	xlog_param(xl, "pid", PIXMAP, FETCH32(data, 4));
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 8));
 	xlog_param(xl, "depth", DECU, FETCH8(data, 1));
@@ -2048,7 +2360,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "height", DECU, FETCH16(data, 12));
 	break;
       case 54:
-	xlog_request_name(xl, "FreePixmap");
+	xlog_request_name(xl, req, "FreePixmap", TRUE);
 	xlog_param(xl, "pixmap", PIXMAP, FETCH32(data, 4));
 	break;
       case 55:
@@ -2058,13 +2370,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 
 	    switch (data[0]) {
 	      case 55:
-		xlog_request_name(xl, "CreateGC");
+		xlog_request_name(xl, req, "CreateGC", TRUE);
 		xlog_param(xl, "cid", GCONTEXT, FETCH32(data, 4));
 		xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 8));
 		i = 16;
 		break;
 	      default /* case 56 */:
-		xlog_request_name(xl, "ChangeGC");
+		xlog_request_name(xl, req, "ChangeGC", TRUE);
 		xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
 		i = 12;
 		break;
@@ -2207,7 +2519,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	}
 	break;
       case 57:
-	xlog_request_name(xl, "CopyGC");
+	xlog_request_name(xl, req, "CopyGC", TRUE);
 	xlog_param(xl, "src-gc", GCONTEXT, FETCH32(data, 4));
 	xlog_param(xl, "dst-gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "value-mask", GENMASK, FETCH32(data, 12),
@@ -2237,7 +2549,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   (char *)NULL);
 	break;
       case 58:
-	xlog_request_name(xl, "SetDashes");
+	xlog_request_name(xl, req, "SetDashes", TRUE);
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
 	xlog_param(xl, "dash-offset", DECU, FETCH16(data, 8));
 	{
@@ -2247,11 +2559,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		char buf[64];
 		sprintf(buf, "dashes[%d]", i);
 		xlog_param(xl, buf, DECU, FETCH8(data, 12+i));
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 59:
-	xlog_request_name(xl, "SetClipRectangles");
+	xlog_request_name(xl, req, "SetClipRectangles", TRUE);
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
 	xlog_param(xl, "clip-x-origin", DEC16, FETCH16(data, 8));
 	xlog_param(xl, "clip-y-origin", DEC16, FETCH16(data, 10));
@@ -2265,6 +2579,8 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_rectangle(xl, data, len, pos);
 		xlog_set_end(xl);
 		pos += 8;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	xlog_param(xl, "ordering", ENUM | SPECVAL, FETCH8(data, 1),
@@ -2272,11 +2588,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "YXBanded", 3, (char *)NULL);
 	break;
       case 60:
-	xlog_request_name(xl, "FreeGC");
+	xlog_request_name(xl, req, "FreeGC", TRUE);
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
 	break;
       case 61:
-	xlog_request_name(xl, "ClearArea");
+	xlog_request_name(xl, req, "ClearArea", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 8));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 10));
@@ -2285,7 +2601,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "exposures", BOOLEAN, FETCH8(data, 1));
 	break;
       case 62:
-	xlog_request_name(xl, "CopyArea");
+	xlog_request_name(xl, req, "CopyArea", TRUE);
 	xlog_param(xl, "src-drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "dst-drawable", DRAWABLE, FETCH32(data, 8));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 12));
@@ -2297,7 +2613,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "dst-y", DEC16, FETCH16(data, 22));
 	break;
       case 63:
-	xlog_request_name(xl, "CopyPlane");
+	xlog_request_name(xl, req, "CopyPlane", TRUE);
 	xlog_param(xl, "src-drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "dst-drawable", DRAWABLE, FETCH32(data, 8));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 12));
@@ -2310,7 +2626,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "bit-plane", DECU, FETCH32(data, 28));
 	break;
       case 64:
-	xlog_request_name(xl, "PolyPoint");
+	xlog_request_name(xl, req, "PolyPoint", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "coordinate-mode", ENUM | SPECVAL,
@@ -2327,11 +2643,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 4;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 65:
-	xlog_request_name(xl, "PolyLine");
+	xlog_request_name(xl, req, "PolyLine", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "coordinate-mode", ENUM | SPECVAL,
@@ -2348,11 +2666,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 4;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 66:
-	xlog_request_name(xl, "PolySegment");
+	xlog_request_name(xl, req, "PolySegment", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	{
@@ -2366,11 +2686,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 8;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 67:
-	xlog_request_name(xl, "PolyRectangle");
+	xlog_request_name(xl, req, "PolyRectangle", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	{
@@ -2384,11 +2706,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 8;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 68:
-	xlog_request_name(xl, "PolyArc");
+	xlog_request_name(xl, req, "PolyArc", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	{
@@ -2402,11 +2726,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 12;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 69:
-	xlog_request_name(xl, "FillPoly");
+	xlog_request_name(xl, req, "FillPoly", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "shape", ENUM | SPECVAL, FETCH8(data, 12),
@@ -2426,11 +2752,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 4;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 70:
-	xlog_request_name(xl, "PolyFillRectangle");
+	xlog_request_name(xl, req, "PolyFillRectangle", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	{
@@ -2444,11 +2772,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 8;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 71:
-	xlog_request_name(xl, "PolyFillArc");
+	xlog_request_name(xl, req, "PolyFillArc", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	{
@@ -2462,11 +2792,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 12;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 72:
-	xlog_request_name(xl, "PutImage");
+	xlog_request_name(xl, req, "PutImage", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "depth", DECU, FETCH8(data, 21));
@@ -2478,10 +2810,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "format", ENUM | SPECVAL,
 		   FETCH8(data, 1), "Bitmap", 0, "XYPixmap", 1,
 		   "ZPixmap", 2, (char *)NULL);
-	/* FIXME: the actual image data is not currently logged */
+	xlog_image_data(xl, "image-data", data, len, 24, FETCH8(data, 1),
+			FETCH16(data, 12) + FETCH8(data, 20),
+			FETCH16(data, 14), FETCH8(data, 21));
 	break;
       case 73:
-	xlog_request_name(xl, "GetImage");
+	xlog_request_name(xl, req, "GetImage", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 8));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 10));
@@ -2492,9 +2826,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   FETCH8(data, 1), "XYPixmap", 1,
 		   "ZPixmap", 2, (char *)NULL);
 	req->replies = 1;
+	req->pixmapformat = FETCH8(data, 1);
+	req->pixmapwidth = FETCH16(data, 12);
+	req->pixmapheight = FETCH16(data, 14);
 	break;
       case 74:
-	xlog_request_name(xl, "PolyText8");
+	xlog_request_name(xl, req, "PolyText8", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
@@ -2559,11 +2896,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 
 		xlog_set_end(xl);
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 75:
-	xlog_request_name(xl, "PolyText16");
+	xlog_request_name(xl, req, "PolyText16", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
@@ -2615,11 +2954,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 
 		xlog_set_end(xl);
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 76:
-	xlog_request_name(xl, "ImageText8");
+	xlog_request_name(xl, req, "ImageText8", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
@@ -2628,7 +2969,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   STRING(data, 16, FETCH8(data, 1)));
 	break;
       case 77:
-	xlog_request_name(xl, "ImageText16");
+	xlog_request_name(xl, req, "ImageText16", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
@@ -2637,7 +2978,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   STRING(data, 16, 2*FETCH8(data, 1)));
 	break;
       case 78:
-	xlog_request_name(xl, "CreateColormap");
+	xlog_request_name(xl, req, "CreateColormap", TRUE);
 	xlog_param(xl, "mid", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "visual", VISUALID, FETCH32(data, 12));
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 8));
@@ -2645,29 +2986,29 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   "None", 0, "All", 1, (char *)NULL);
 	break;
       case 79:
-	xlog_request_name(xl, "FreeColormap");
+	xlog_request_name(xl, req, "FreeColormap", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	break;
       case 80:
-	xlog_request_name(xl, "CopyColormapAndFree");
+	xlog_request_name(xl, req, "CopyColormapAndFree", TRUE);
 	xlog_param(xl, "mid", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "src-cmap", COLORMAP, FETCH32(data, 8));
 	break;
       case 81:
-	xlog_request_name(xl, "InstallColormap");
+	xlog_request_name(xl, req, "InstallColormap", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	break;
       case 82:
-	xlog_request_name(xl, "UninstallColormap");
+	xlog_request_name(xl, req, "UninstallColormap", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	break;
       case 83:
-	xlog_request_name(xl, "ListInstalledColormaps");
+	xlog_request_name(xl, req, "ListInstalledColormaps", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	req->replies = 1;
 	break;
       case 84:
-	xlog_request_name(xl, "AllocColor");
+	xlog_request_name(xl, req, "AllocColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "red", HEX16, FETCH16(data, 8));
 	xlog_param(xl, "green", HEX16, FETCH16(data, 10));
@@ -2675,14 +3016,14 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 85:
-	xlog_request_name(xl, "AllocNamedColor");
+	xlog_request_name(xl, req, "AllocNamedColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "name", STRING, FETCH16(data, 8),
 		   STRING(data, 12, FETCH16(data, 8)));
 	req->replies = 1;
 	break;
       case 86:
-	xlog_request_name(xl, "AllocColorCells");
+	xlog_request_name(xl, req, "AllocColorCells", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "colors", DECU, FETCH16(data, 8));
 	xlog_param(xl, "planes", DECU, FETCH16(data, 10));
@@ -2690,7 +3031,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 87:
-	xlog_request_name(xl, "AllocColorPlanes");
+	xlog_request_name(xl, req, "AllocColorPlanes", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "colors", DECU, FETCH16(data, 8));
 	xlog_param(xl, "reds", DECU, FETCH16(data, 10));
@@ -2700,7 +3041,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 88:
-	xlog_request_name(xl, "FreeColors");
+	xlog_request_name(xl, req, "FreeColors", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	{
 	    int pos = 12;
@@ -2711,12 +3052,14 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
 		pos += 4;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	xlog_param(xl, "plane-mask", HEX32, FETCH32(data, 8));
 	break;
       case 89:
-	xlog_request_name(xl, "StoreColors");
+	xlog_request_name(xl, req, "StoreColors", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	{
 	    int pos = 8;
@@ -2729,11 +3072,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_set_end(xl);
 		pos += 12;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 90:
-	xlog_request_name(xl, "StoreNamedColor");
+	xlog_request_name(xl, req, "StoreNamedColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "pixel", COLORMAP, FETCH32(data, 8));
 	xlog_param(xl, "name", STRING, FETCH16(data, 12),
@@ -2745,7 +3090,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   (FETCH8(data, 1) >> 2) & 1);
 	break;
       case 91:
-	xlog_request_name(xl, "QueryColors");
+	xlog_request_name(xl, req, "QueryColors", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	{
 	    int pos = 8;
@@ -2756,19 +3101,21 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
 		pos += 4;
 		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	req->replies = 1;
 	break;
       case 92:
-	xlog_request_name(xl, "LookupColor");
+	xlog_request_name(xl, req, "LookupColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "name", STRING, FETCH16(data, 8),
 		   STRING(data, 12, FETCH16(data, 8)));
 	req->replies = 1;
 	break;
       case 93:
-	xlog_request_name(xl, "CreateCursor");
+	xlog_request_name(xl, req, "CreateCursor", TRUE);
 	xlog_param(xl, "cid", CURSOR, FETCH32(data, 4));
 	xlog_param(xl, "source", PIXMAP, FETCH32(data, 8));
 	xlog_param(xl, "mask", PIXMAP | SPECVAL, FETCH32(data, 12),
@@ -2783,7 +3130,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "y", DECU, FETCH16(data, 30));
 	break;
       case 94:
-	xlog_request_name(xl, "CreateGlyphCursor");
+	xlog_request_name(xl, req, "CreateGlyphCursor", TRUE);
 	xlog_param(xl, "cid", CURSOR, FETCH32(data, 4));
 	xlog_param(xl, "source-font", FONT, FETCH32(data, 8));
 	xlog_param(xl, "mask-font", FONT | SPECVAL, FETCH32(data, 12),
@@ -2798,11 +3145,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "back-blue", HEX16, FETCH16(data, 30));
 	break;
       case 95:
-	xlog_request_name(xl, "FreeCursor");
+	xlog_request_name(xl, req, "FreeCursor", TRUE);
 	xlog_param(xl, "cursor", CURSOR, FETCH32(data, 4));
 	break;
       case 96:
-	xlog_request_name(xl, "RecolorCursor");
+	xlog_request_name(xl, req, "RecolorCursor", TRUE);
 	xlog_param(xl, "cursor", CURSOR, FETCH32(data, 4));
 	xlog_param(xl, "fore-red", HEX16, FETCH16(data, 8));
 	xlog_param(xl, "fore-green", HEX16, FETCH16(data, 10));
@@ -2812,7 +3159,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "back-blue", HEX16, FETCH16(data, 18));
 	break;
       case 97:
-	xlog_request_name(xl, "QueryBestSize");
+	xlog_request_name(xl, req, "QueryBestSize", TRUE);
 	xlog_param(xl, "class", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Cursor", 0, "Tile", 1, "Stipple", 2, (char *)NULL);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
@@ -2821,7 +3168,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 98:
-	xlog_request_name(xl, "QueryExtension");
+	xlog_request_name(xl, req, "QueryExtension", TRUE);
 	xlog_param(xl, "name", STRING,
 		   FETCH16(data, 4),
 		   STRING(data, 8, FETCH16(data, 4)));
@@ -2839,11 +3186,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 99:
-	xlog_request_name(xl, "ListExtensions");
+	xlog_request_name(xl, req, "ListExtensions", TRUE);
 	req->replies = 1;
 	break;
       case 100:
-	xlog_request_name(xl, "ChangeKeyboardMapping");
+	xlog_request_name(xl, req, "ChangeKeyboardMapping", TRUE);
 	{
 	    int keycode = FETCH8(data, 4);
 	    int keycode_count = FETCH8(data, 1);
@@ -2864,11 +3211,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		i++;
 		keycode++;
 		keycode_count--;
+		if (keycode_count > 0 && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 101:
-	xlog_request_name(xl, "GetKeyboardMapping");
+	xlog_request_name(xl, req, "GetKeyboardMapping", TRUE);
 	req->first_keycode = FETCH8(data, 4);
 	req->keycode_count = FETCH8(data, 5);
 	xlog_param(xl, "first-keycode", DECU, req->first_keycode);
@@ -2876,7 +3225,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 102:
-	xlog_request_name(xl, "ChangeKeyboardControl");
+	xlog_request_name(xl, req, "ChangeKeyboardControl", TRUE);
 	{
 	    unsigned i = 8;
 	    unsigned bitmask = FETCH32(data, i-4);
@@ -2924,15 +3273,15 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	}
 	break;
       case 103:
-	xlog_request_name(xl, "GetKeyboardControl");
+	xlog_request_name(xl, req, "GetKeyboardControl", TRUE);
 	req->replies = 1;
 	break;
       case 104:
-	xlog_request_name(xl, "Bell");
+	xlog_request_name(xl, req, "Bell", TRUE);
 	xlog_param(xl, "percent", DEC8, FETCH8(data, 1));
 	break;
       case 105:
-	xlog_request_name(xl, "ChangePointerControl");
+	xlog_request_name(xl, req, "ChangePointerControl", TRUE);
 	if (FETCH8(data, 10))
 	    xlog_param(xl, "acceleration", RATIONAL16, FETCH16(data, 4),
 		       FETCH16(data, 6));
@@ -2940,11 +3289,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	    xlog_param(xl, "threshold", DEC16, FETCH16(data, 8));
 	break;
       case 106:
-	xlog_request_name(xl, "GetPointerControl");
+	xlog_request_name(xl, req, "GetPointerControl", TRUE);
 	req->replies = 1;
 	break;
       case 107:
-	xlog_request_name(xl, "SetScreenSaver");
+	xlog_request_name(xl, req, "SetScreenSaver", TRUE);
 	xlog_param(xl, "timeout", DEC16, FETCH16(data, 4));
 	xlog_param(xl, "interval", DEC16, FETCH16(data, 6));
 	xlog_param(xl, "prefer-blanking", ENUM | SPECVAL,
@@ -2955,40 +3304,40 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		   (char *)NULL);
 	break;
       case 108:
-	xlog_request_name(xl, "GetScreenSaver");
+	xlog_request_name(xl, req, "GetScreenSaver", TRUE);
 	req->replies = 1;
 	break;
       case 109:
-	xlog_request_name(xl, "ChangeHosts");
+	xlog_request_name(xl, req, "ChangeHosts", TRUE);
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Insert", 0, "Delete", 1, (char *)NULL);
 	xlog_param(xl, "family", ENUM | SPECVAL, FETCH8(data, 4),
 		   "Internet", 0, "DECnet", 1, "Chaos", 2,
 		   (char *)NULL);
-	xlog_param(xl, "address", HEXSTRING, FETCH16(data, 6),
+	xlog_param(xl, "address", HEXSTRING1, FETCH16(data, 6),
 		   STRING(data, 8, FETCH16(data, 6)));
 	break;
       case 110:
-	xlog_request_name(xl, "ListHosts");
+	xlog_request_name(xl, req, "ListHosts", TRUE);
 	req->replies = 1;
 	break;
       case 111:
-	xlog_request_name(xl, "SetAccessControl");
+	xlog_request_name(xl, req, "SetAccessControl", TRUE);
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Disable", 0, "Enable", 1, (char *)NULL);
 	break;
       case 112:
-	xlog_request_name(xl, "SetCloseDownMode");
+	xlog_request_name(xl, req, "SetCloseDownMode", TRUE);
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Destroy", 0, "RetainPermanent", 1,
 		   "RetainTemporary", 2, (char *)NULL);
 	break;
       case 113:
-	xlog_request_name(xl, "KillClient");
+	xlog_request_name(xl, req, "KillClient", TRUE);
 	xlog_param(xl, "resource", HEX32, FETCH32(data, 4));
 	break;
       case 114:
-	xlog_request_name(xl, "RotateProperties");
+	xlog_request_name(xl, req, "RotateProperties", TRUE);
 	xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
 	xlog_param(xl, "delta", DEC16, FETCH16(data, 10));
 	{
@@ -3000,16 +3349,18 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		sprintf(buf, "properties[%d]", i);
 		xlog_param(xl, buf, ATOM, FETCH32(data, pos));
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
       case 115:
-	xlog_request_name(xl, "ForceScreenSaver");
+	xlog_request_name(xl, req, "ForceScreenSaver", TRUE);
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Reset", 0, "Activate", 1, (char *)NULL);
 	break;
       case 116:
-	xlog_request_name(xl, "SetPointerMapping");
+	xlog_request_name(xl, req, "SetPointerMapping", TRUE);
 	{
 	    int pos = 4;
 	    int i = 0;
@@ -3019,16 +3370,18 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		sprintf(buf, "map[%d]", i);
 		xlog_param(xl, buf, DECU, FETCH8(data, pos));
 		pos++;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	req->replies = 1;
 	break;
       case 117:
-	xlog_request_name(xl, "GetPointerMapping");
+	xlog_request_name(xl, req, "GetPointerMapping", TRUE);
 	req->replies = 1;
 	break;
       case 118:
-	xlog_request_name(xl, "SetModifierMapping");
+	xlog_request_name(xl, req, "SetModifierMapping", TRUE);
 	{
 	    int keycodes_per_modifier = FETCH8(data, 1);
 	    int pos = 4;
@@ -3044,39 +3397,41 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		    pos++;
 		}
 		xlog_set_end(xl);
+		if (mod+1 < 8 && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	req->replies = 1;
 	break;
       case 119:
-	xlog_request_name(xl, "GetModifierMapping");
+	xlog_request_name(xl, req, "GetModifierMapping", TRUE);
 	req->replies = 1;
 	break;
       case 127:
-	xlog_request_name(xl, "NoOperation");
+	xlog_request_name(xl, req, "NoOperation", TRUE);
 	break;
 
       case EXT_BIGREQUESTS | 0:
-	xlog_request_name(xl, "BigReqEnable");
+	xlog_request_name(xl, req, "BigReqEnable", TRUE);
 	req->replies = 1;
 	break;
 
       case EXT_MITSHM | 0:
-	xlog_request_name(xl, "ShmQueryVersion");
+	xlog_request_name(xl, req, "ShmQueryVersion", TRUE);
 	req->replies = 1;
 	break;
       case EXT_MITSHM | 1:
-	xlog_request_name(xl, "ShmAttach");
+	xlog_request_name(xl, req, "ShmAttach", TRUE);
 	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 4));
 	xlog_param(xl, "shmid", HEX32, FETCH32(data, 8));
 	xlog_param(xl, "read-only", BOOLEAN, FETCH8(data, 12));
 	break;
       case EXT_MITSHM | 2:
-	xlog_request_name(xl, "ShmDetach");
+	xlog_request_name(xl, req, "ShmDetach", TRUE);
 	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 4));
 	break;
       case EXT_MITSHM | 3:
-	xlog_request_name(xl, "ShmPutImage");
+	xlog_request_name(xl, req, "ShmPutImage", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "total-width", DECU, FETCH16(data, 12));
@@ -3095,7 +3450,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "offset", HEX32, FETCH32(data, 36));
 	break;
       case EXT_MITSHM | 4:
-	xlog_request_name(xl, "ShmGetImage");
+	xlog_request_name(xl, req, "ShmGetImage", TRUE);
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 8));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 10));
@@ -3109,7 +3464,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case EXT_MITSHM | 5:
-	xlog_request_name(xl, "ShmCreatePixmap");
+	xlog_request_name(xl, req, "ShmCreatePixmap", TRUE);
 	xlog_param(xl, "pid", PIXMAP, FETCH32(data, 4));
 	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 8));
 	xlog_param(xl, "width", DECU, FETCH16(data, 12));
@@ -3117,6 +3472,935 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "depth", DECU, FETCH8(data, 16));
 	xlog_param(xl, "shmseg", HEX32, FETCH32(data, 20));
 	xlog_param(xl, "offset", HEX32, FETCH32(data, 24));
+	break;
+
+      case EXT_RENDER | 0:
+	xlog_request_name(xl, req, "RenderQueryVersion", TRUE);
+	xlog_param(xl, "client-major-version", DECU, FETCH32(data, 4));
+	xlog_param(xl, "client-minor-version", DECU, FETCH32(data, 8));
+	req->replies = 1;
+	break;
+      case EXT_RENDER | 1:
+	xlog_request_name(xl, req, "RenderQueryPictFormats", TRUE);
+	req->replies = 1;
+	break;
+      case EXT_RENDER | 2:
+	xlog_request_name(xl, req, "RenderQueryPictIndexValues", TRUE);
+	xlog_param(xl, "format", PICTFORMAT, FETCH32(data, 4));
+	req->replies = 1;
+	break;
+      case EXT_RENDER | 3:
+	xlog_request_name(xl, req, "RenderQueryDithers", TRUE);
+	/*
+	 * This request is not supported by X.Org or Xlib at the
+	 * time of writing, so I can't be certain of its contents
+	 * format.
+	 */
+	xlog_param(xl, "<unknown request format>", NOTEVENEQUALSIGN);
+	req->replies = 1;
+	break;
+      case EXT_RENDER | 4:
+      case EXT_RENDER | 5:
+	{
+	    unsigned i, bitmask;
+	    switch (req->opcode) {
+	      case EXT_RENDER | 4:
+		xlog_request_name(xl, req, "RenderCreatePicture", TRUE);
+		xlog_param(xl, "pid", PICTURE, FETCH32(data, 4));
+		xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 8));
+		xlog_param(xl, "format", PICTFORMAT, FETCH32(data, 12));
+		i = 20;
+		break;
+	      default /* case EXT_RENDER | 5 */ :
+		xlog_request_name(xl, req, "RenderChangePicture", TRUE);
+		xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
+		i = 12;
+		break;
+	    }
+
+	    bitmask = FETCH32(data, i-4);
+	    if (bitmask & 0x00000001) {
+		xlog_param(xl, "repeat", ENUM | SPECVAL, FETCH32(data, i),
+			   "None", 0, "Normal", 1, "Pad", 2, "Reflect", 3,
+			   (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00000002) {
+		xlog_param(xl, "alpha-map", PICTURE | SPECVAL,
+			   FETCH32(data, i), "None", 0, (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00000004) {
+		xlog_param(xl, "alpha-x-origin", DEC16, FETCH32(data, i));
+		i += 4;
+	    }
+	    if (bitmask & 0x00000008) {
+		xlog_param(xl, "alpha-y-origin", DEC16, FETCH32(data, i));
+		i += 4;
+	    }
+	    if (bitmask & 0x00000010) {
+		xlog_param(xl, "clip-x-origin", DEC16, FETCH32(data, i));
+		i += 4;
+	    }
+	    if (bitmask & 0x00000020) {
+		xlog_param(xl, "clip-y-origin", DEC16, FETCH32(data, i));
+		i += 4;
+	    }
+	    if (bitmask & 0x00000040) {
+		xlog_param(xl, "clip-mask", PIXMAP | SPECVAL,
+			   FETCH32(data, i), "None", 0, (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00000080) {
+		xlog_param(xl, "graphics-exposures", BOOLEAN,
+			   FETCH32(data, i));
+		i += 4;
+	    }
+	    if (bitmask & 0x00000100) {
+		xlog_param(xl, "subwindow-mode", ENUM | SPECVAL,
+			   FETCH32(data, i), "ClipByChildren", 0,
+			   "IncludeInferiors", 1, (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00000200) {
+		xlog_param(xl, "poly-edge", ENUM | SPECVAL,
+			   FETCH32(data, i), "Sharp", 0, "Smooth", 1,
+			   (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00000400) {
+		xlog_param(xl, "poly-mode", ENUM | SPECVAL,
+			   FETCH32(data, i), "Precise", 0, "Imprecise", 1,
+			   (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00000800) {
+		xlog_param(xl, "dither", ATOM | SPECVAL, FETCH32(data, i),
+			   "None", 0, (char *)NULL);
+		i += 4;
+	    }
+	    if (bitmask & 0x00001000) {
+		xlog_param(xl, "component-alpha", BOOLEAN, FETCH32(data, i));
+		i += 4;
+	    }
+	}
+	break;
+      case EXT_RENDER | 6:
+	xlog_request_name(xl, req, "RenderSetPictureClipRectangles", TRUE);
+	xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
+	xlog_param(xl, "clip-x-origin", DEC16, FETCH16(data, 8));
+	xlog_param(xl, "clip-y-origin", DEC16, FETCH16(data, 10));
+	{
+	    int pos = 12;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 8 <= len) {
+		sprintf(buf, "rectangles[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_rectangle(xl, data, len, pos);
+		xlog_set_end(xl);
+		pos += 8;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 7:
+	xlog_request_name(xl, req, "RenderFreePicture", TRUE);
+	xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
+	break;
+      case EXT_RENDER | 8:
+	xlog_request_name(xl, req, "RenderComposite", TRUE);
+	xlog_param(xl, "op", ENUM | SPECVAL, FETCH8(data, 4),
+		   "Clear", 0,
+		   "Src", 1,
+		   "Dst", 2,
+		   "Over", 3,
+		   "OverReverse", 4,
+		   "In", 5,
+		   "InReverse", 6,
+		   "Out", 7,
+		   "OutReverse", 8,
+		   "Atop", 9,
+		   "AtopReverse", 10,
+		   "Xor", 11,
+		   "Add", 12,
+		   "Saturate", 13,
+		   "DisjointClear", 0x10,
+		   "DisjointSrc", 0x11,
+		   "DisjointDst", 0x12,
+		   "DisjointOver", 0x13,
+		   "DisjointOverReverse", 0x14,
+		   "DisjointIn", 0x15,
+		   "DisjointInReverse", 0x16,
+		   "DisjointOut", 0x17,
+		   "DisjointOutReverse", 0x18,
+		   "DisjointAtop", 0x19,
+		   "DisjointAtopReverse", 0x1a,
+		   "DisjointXor", 0x1b,
+		   "ConjointClear", 0x20,
+		   "ConjointSrc", 0x21,
+		   "ConjointDst", 0x22,
+		   "ConjointOver", 0x23,
+		   "ConjointOverReverse", 0x24,
+		   "ConjointIn", 0x25,
+		   "ConjointInReverse", 0x26,
+		   "ConjointOut", 0x27,
+		   "ConjointOutReverse", 0x28,
+		   "ConjointAtop", 0x29,
+		   "ConjointAtopReverse", 0x2a,
+		   "ConjointXor", 0x2b);
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "mask", PICTURE | SPECVAL, FETCH32(data, 12),
+		   "None", 0, (char *)NULL);
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 16));
+	xlog_param(xl, "src-x", DEC16, FETCH16(data, 20));
+	xlog_param(xl, "src-y", DEC16, FETCH16(data, 22));
+	xlog_param(xl, "mask-x", DEC16, FETCH16(data, 24));
+	xlog_param(xl, "mask-y", DEC16, FETCH16(data, 26));
+	xlog_param(xl, "dst-x", DEC16, FETCH16(data, 28));
+	xlog_param(xl, "dst-y", DEC16, FETCH16(data, 30));
+	xlog_param(xl, "width", DECU, FETCH16(data, 32));
+	xlog_param(xl, "height", DECU, FETCH16(data, 34));
+	break;
+      case EXT_RENDER | 9:
+	xlog_request_name(xl, req, "RenderScale", TRUE);
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 4));
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "color-scale", HEX32, FETCH32(data, 12));
+	xlog_param(xl, "alpha-scale", HEX32, FETCH32(data, 16));
+	xlog_param(xl, "src-x", DEC16, FETCH16(data, 20));
+	xlog_param(xl, "src-y", DEC16, FETCH16(data, 22));
+	xlog_param(xl, "dst-x", DEC16, FETCH16(data, 24));
+	xlog_param(xl, "dst-y", DEC16, FETCH16(data, 26));
+	xlog_param(xl, "width", DECU, FETCH16(data, 28));
+	xlog_param(xl, "height", DECU, FETCH16(data, 30));
+	break;
+      case EXT_RENDER | 10:
+	xlog_request_name(xl, req, "RenderTrapezoids", TRUE);
+	xlog_param(xl, "op", ENUM | SPECVAL, FETCH8(data, 4),
+		   "Clear", 0,
+		   "Src", 1,
+		   "Dst", 2,
+		   "Over", 3,
+		   "OverReverse", 4,
+		   "In", 5,
+		   "InReverse", 6,
+		   "Out", 7,
+		   "OutReverse", 8,
+		   "Atop", 9,
+		   "AtopReverse", 10,
+		   "Xor", 11,
+		   "Add", 12,
+		   "Saturate", 13,
+		   "DisjointClear", 0x10,
+		   "DisjointSrc", 0x11,
+		   "DisjointDst", 0x12,
+		   "DisjointOver", 0x13,
+		   "DisjointOverReverse", 0x14,
+		   "DisjointIn", 0x15,
+		   "DisjointInReverse", 0x16,
+		   "DisjointOut", 0x17,
+		   "DisjointOutReverse", 0x18,
+		   "DisjointAtop", 0x19,
+		   "DisjointAtopReverse", 0x1a,
+		   "DisjointXor", 0x1b,
+		   "ConjointClear", 0x20,
+		   "ConjointSrc", 0x21,
+		   "ConjointDst", 0x22,
+		   "ConjointOver", 0x23,
+		   "ConjointOverReverse", 0x24,
+		   "ConjointIn", 0x25,
+		   "ConjointInReverse", 0x26,
+		   "ConjointOut", 0x27,
+		   "ConjointOutReverse", 0x28,
+		   "ConjointAtop", 0x29,
+		   "ConjointAtopReverse", 0x2a,
+		   "ConjointXor", 0x2b);
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "src-x", DEC16, FETCH16(data, 20));
+	xlog_param(xl, "src-y", DEC16, FETCH16(data, 22));
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 12));
+	xlog_param(xl, "mask-format", PICTFORMAT | SPECVAL, FETCH32(data, 16),
+		   "None", 0, (char *)NULL);
+	{
+	    int pos = 24;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 40 <= len) {
+		sprintf(buf, "trapezoids[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "top", FIXED, FETCH32(data, pos));
+		xlog_param(xl, "bottom", FIXED, FETCH32(data, pos+4));
+		xlog_param(xl, "left.p1.x", FIXED, FETCH32(data, pos+8));
+		xlog_param(xl, "left.p1.y", FIXED, FETCH32(data, pos+12));
+		xlog_param(xl, "left.p2.x", FIXED, FETCH32(data, pos+16));
+		xlog_param(xl, "left.p2.y", FIXED, FETCH32(data, pos+20));
+		xlog_param(xl, "right.p1.x", FIXED, FETCH32(data, pos+24));
+		xlog_param(xl, "right.p1.y", FIXED, FETCH32(data, pos+28));
+		xlog_param(xl, "right.p2.x", FIXED, FETCH32(data, pos+32));
+		xlog_param(xl, "right.p2.y", FIXED, FETCH32(data, pos+36));
+		xlog_set_end(xl);
+		pos += 40;
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 11:
+	xlog_request_name(xl, req, "RenderTriangles", TRUE);
+	xlog_param(xl, "op", ENUM | SPECVAL, FETCH8(data, 4),
+		   "Clear", 0,
+		   "Src", 1,
+		   "Dst", 2,
+		   "Over", 3,
+		   "OverReverse", 4,
+		   "In", 5,
+		   "InReverse", 6,
+		   "Out", 7,
+		   "OutReverse", 8,
+		   "Atop", 9,
+		   "AtopReverse", 10,
+		   "Xor", 11,
+		   "Add", 12,
+		   "Saturate", 13,
+		   "DisjointClear", 0x10,
+		   "DisjointSrc", 0x11,
+		   "DisjointDst", 0x12,
+		   "DisjointOver", 0x13,
+		   "DisjointOverReverse", 0x14,
+		   "DisjointIn", 0x15,
+		   "DisjointInReverse", 0x16,
+		   "DisjointOut", 0x17,
+		   "DisjointOutReverse", 0x18,
+		   "DisjointAtop", 0x19,
+		   "DisjointAtopReverse", 0x1a,
+		   "DisjointXor", 0x1b,
+		   "ConjointClear", 0x20,
+		   "ConjointSrc", 0x21,
+		   "ConjointDst", 0x22,
+		   "ConjointOver", 0x23,
+		   "ConjointOverReverse", 0x24,
+		   "ConjointIn", 0x25,
+		   "ConjointInReverse", 0x26,
+		   "ConjointOut", 0x27,
+		   "ConjointOutReverse", 0x28,
+		   "ConjointAtop", 0x29,
+		   "ConjointAtopReverse", 0x2a,
+		   "ConjointXor", 0x2b);
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "src-x", DEC16, FETCH16(data, 20));
+	xlog_param(xl, "src-y", DEC16, FETCH16(data, 22));
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 12));
+	xlog_param(xl, "mask-format", PICTFORMAT | SPECVAL, FETCH32(data, 16),
+		   "None", 0, (char *)NULL);
+	{
+	    int pos = 24;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 24 <= len) {
+		sprintf(buf, "triangles[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "p1.x", FIXED, FETCH32(data, pos));
+		xlog_param(xl, "p1.y", FIXED, FETCH32(data, pos+4));
+		xlog_param(xl, "p2.x", FIXED, FETCH32(data, pos+8));
+		xlog_param(xl, "p2.y", FIXED, FETCH32(data, pos+12));
+		xlog_param(xl, "p3.x", FIXED, FETCH32(data, pos+16));
+		xlog_param(xl, "p3.y", FIXED, FETCH32(data, pos+20));
+		xlog_set_end(xl);
+		pos += 24;
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 12:
+      case EXT_RENDER | 13:
+	switch (req->opcode) {
+	  case EXT_RENDER | 12:
+	    xlog_request_name(xl, req, "RenderTriStrip", TRUE);
+	    break;
+	  case EXT_RENDER | 13:
+	    xlog_request_name(xl, req, "RenderTriFan", TRUE);
+	    break;
+	}
+	xlog_param(xl, "op", ENUM | SPECVAL, FETCH8(data, 4),
+		   "Clear", 0,
+		   "Src", 1,
+		   "Dst", 2,
+		   "Over", 3,
+		   "OverReverse", 4,
+		   "In", 5,
+		   "InReverse", 6,
+		   "Out", 7,
+		   "OutReverse", 8,
+		   "Atop", 9,
+		   "AtopReverse", 10,
+		   "Xor", 11,
+		   "Add", 12,
+		   "Saturate", 13,
+		   "DisjointClear", 0x10,
+		   "DisjointSrc", 0x11,
+		   "DisjointDst", 0x12,
+		   "DisjointOver", 0x13,
+		   "DisjointOverReverse", 0x14,
+		   "DisjointIn", 0x15,
+		   "DisjointInReverse", 0x16,
+		   "DisjointOut", 0x17,
+		   "DisjointOutReverse", 0x18,
+		   "DisjointAtop", 0x19,
+		   "DisjointAtopReverse", 0x1a,
+		   "DisjointXor", 0x1b,
+		   "ConjointClear", 0x20,
+		   "ConjointSrc", 0x21,
+		   "ConjointDst", 0x22,
+		   "ConjointOver", 0x23,
+		   "ConjointOverReverse", 0x24,
+		   "ConjointIn", 0x25,
+		   "ConjointInReverse", 0x26,
+		   "ConjointOut", 0x27,
+		   "ConjointOutReverse", 0x28,
+		   "ConjointAtop", 0x29,
+		   "ConjointAtopReverse", 0x2a,
+		   "ConjointXor", 0x2b);
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "src-x", DEC16, FETCH16(data, 20));
+	xlog_param(xl, "src-y", DEC16, FETCH16(data, 22));
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 12));
+	xlog_param(xl, "mask-format", PICTFORMAT | SPECVAL, FETCH32(data, 16),
+		   "None", 0, (char *)NULL);
+	{
+	    int pos = 24;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 8 <= len) {
+		sprintf(buf, "points[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "x", FIXED, FETCH32(data, pos));
+		xlog_param(xl, "y", FIXED, FETCH32(data, pos+4));
+		xlog_set_end(xl);
+		pos += 8;
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 14:
+	xlog_request_name(xl, req, "RenderColorTrapezoids", TRUE);
+	/*
+	 * This request is not supported by X.Org or Xlib at the
+	 * time of writing, so I can't be certain of its contents
+	 * format.
+	 */
+	xlog_param(xl, "<unknown request format>", NOTEVENEQUALSIGN);
+	break;
+      case EXT_RENDER | 15:
+	xlog_request_name(xl, req, "RenderColorTriangles", TRUE);
+	/*
+	 * This request is not supported by X.Org or Xlib at the
+	 * time of writing, so I can't be certain of its contents
+	 * format.
+	 */
+	xlog_param(xl, "<unknown request format>", NOTEVENEQUALSIGN);
+	break;
+      case EXT_RENDER | 16:
+	xlog_request_name(xl, req, "RenderTransform", TRUE);
+	/*
+	 * This request is not supported by X.Org or Xlib at the
+	 * time of writing, so I can't be certain of its contents
+	 * format.
+	 */
+	xlog_param(xl, "<unknown request format>", NOTEVENEQUALSIGN);
+	break;
+      case EXT_RENDER | 17:
+      case EXT_RENDER | 18:
+	switch (req->opcode) {
+	  case EXT_RENDER | 17:
+	    xlog_request_name(xl, req, "RenderCreateGlyphSet", TRUE);
+	    xlog_param(xl, "gsid", GLYPHSET, FETCH32(data, 4));
+	    xlog_param(xl, "format", PICTFORMAT, FETCH32(data, 8));
+	    break;
+	  case EXT_RENDER | 18:
+	    xlog_request_name(xl, req, "RenderReferenceGlyphSet", TRUE);
+	    xlog_param(xl, "gsid", GLYPHSET, FETCH32(data, 4));
+	    xlog_param(xl, "existing", GLYPHSET, FETCH32(data, 8));
+	}
+	/*
+	 * Now remember the depth for this glyphset, by reading it
+	 * out of either the PICTFORMAT or the GLYPHSET.
+	 */
+	{
+	    struct resdepth *existing;
+	    struct resdepth *gsd;
+	    struct resdepth *old;
+	    unsigned long oldid = FETCH32(data, 8);
+
+	    existing = find234(xl->resdepths, &oldid, resdepthfind);
+
+	    if (existing) {
+		gsd = snew(struct resdepth);
+		gsd->resource = FETCH32(data, 4);
+		gsd->depth = existing->depth;
+		/*
+		 * Find any previous entry for this glyphset id, and
+		 * override it.
+		 */
+		old = del234(xl->resdepths, gsd);
+		sfree(old);
+		/*
+		 * Now add the new one.
+		 */
+		add234(xl->resdepths, gsd);
+	    }
+	}
+	break;
+      case EXT_RENDER | 19:
+	xlog_request_name(xl, req, "RenderFreeGlyphSet", TRUE);
+	xlog_param(xl, "glyphset", GLYPHSET, FETCH32(data, 4));
+	break;
+      case EXT_RENDER | 20:
+	xlog_request_name(xl, req, "RenderAddGlyphs", TRUE);
+	xlog_param(xl, "glyphset", GLYPHSET, FETCH32(data, 4));
+	{
+	    int pos = 12, whpos;
+	    int i = 0;
+	    char buf[64];
+	    int n = FETCH32(data, pos-4);
+	    int depth;
+
+	    for (i = 0; i < n; i++) {
+		sprintf(buf, "glyphids[%d]", i);
+		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
+		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+
+	    whpos = pos;
+	    for (i = 0; i < n; i++) {
+		sprintf(buf, "glyphs[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "width", DECU, FETCH16(data, pos));
+		xlog_param(xl, "height", DECU, FETCH16(data, pos+2));
+		xlog_param(xl, "x", DEC16, FETCH16(data, pos+4));
+		xlog_param(xl, "y", DEC16, FETCH16(data, pos+6));
+		xlog_param(xl, "off-x", DEC16, FETCH16(data, pos+8));
+		xlog_param(xl, "off-y", DEC16, FETCH16(data, pos+10));
+		xlog_set_end(xl);
+		pos += 12;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+
+	    {
+		unsigned long oldid = FETCH32(data, 4);
+		struct resdepth *rd;
+		rd = find234(xl->resdepths, &oldid, resdepthfind);
+		if (rd)
+		    depth = rd->depth;
+		else
+		    depth = 0;
+	    }
+	    for (i = 0; i < n; i++) {
+		int ret;
+		sprintf(buf, "glyphimages[%d]", i);
+		ret = xlog_image_data(xl, buf, data, len, pos, 2,
+				      FETCH16(data, whpos+12*i),
+				      FETCH16(data, whpos+12*i+2), depth);
+		if (ret < 0)
+		    break; /* don't know how to advance to next image */
+		pos += (ret + 3) &~ 3;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 21:
+	xlog_request_name(xl, req, "RenderAddGlyphsFromPicture", TRUE);
+	/*
+	 * This request is not supported by X.Org or Xlib at the
+	 * time of writing, so I can't be certain of its contents
+	 * format.
+	 */
+	xlog_param(xl, "<unknown request format>", NOTEVENEQUALSIGN);
+	break;
+      case EXT_RENDER | 22:
+	xlog_request_name(xl, req, "RenderFreeGlyphs", TRUE);
+	xlog_param(xl, "glyphset", GLYPHSET, FETCH32(data, 4));
+	{
+	    int pos = 12;
+	    int i = 0;
+	    char buf[64];
+	    int n = FETCH32(data, pos-4);
+
+	    for (i = 0; i < n; i++) {
+		sprintf(buf, "glyphs[%d]", i);
+		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
+		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 23:
+      case EXT_RENDER | 24:
+      case EXT_RENDER | 25:
+	switch (req->opcode) {
+	  case EXT_RENDER | 23:
+	    xlog_request_name(xl, req, "RenderCompositeGlyphs8", TRUE);
+	    break;
+	  case EXT_RENDER | 24:
+	    xlog_request_name(xl, req, "RenderCompositeGlyphs16", TRUE);
+	    break;
+	  case EXT_RENDER | 25:
+	    xlog_request_name(xl, req, "RenderCompositeGlyphs32", TRUE);
+	    break;
+	}
+	xlog_param(xl, "op", ENUM | SPECVAL, FETCH8(data, 4),
+		   "Clear", 0,
+		   "Src", 1,
+		   "Dst", 2,
+		   "Over", 3,
+		   "OverReverse", 4,
+		   "In", 5,
+		   "InReverse", 6,
+		   "Out", 7,
+		   "OutReverse", 8,
+		   "Atop", 9,
+		   "AtopReverse", 10,
+		   "Xor", 11,
+		   "Add", 12,
+		   "Saturate", 13,
+		   "DisjointClear", 0x10,
+		   "DisjointSrc", 0x11,
+		   "DisjointDst", 0x12,
+		   "DisjointOver", 0x13,
+		   "DisjointOverReverse", 0x14,
+		   "DisjointIn", 0x15,
+		   "DisjointInReverse", 0x16,
+		   "DisjointOut", 0x17,
+		   "DisjointOutReverse", 0x18,
+		   "DisjointAtop", 0x19,
+		   "DisjointAtopReverse", 0x1a,
+		   "DisjointXor", 0x1b,
+		   "ConjointClear", 0x20,
+		   "ConjointSrc", 0x21,
+		   "ConjointDst", 0x22,
+		   "ConjointOver", 0x23,
+		   "ConjointOverReverse", 0x24,
+		   "ConjointIn", 0x25,
+		   "ConjointInReverse", 0x26,
+		   "ConjointOut", 0x27,
+		   "ConjointOutReverse", 0x28,
+		   "ConjointAtop", 0x29,
+		   "ConjointAtopReverse", 0x2a,
+		   "ConjointXor", 0x2b);
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 12));
+	xlog_param(xl, "mask-format", PICTFORMAT | SPECVAL, FETCH32(data, 16),
+		   "None", 0, (char *)NULL);
+	xlog_param(xl, "glyphset", GLYPHABLE, FETCH32(data, 20));
+	xlog_param(xl, "src-x", DEC16, FETCH16(data, 24));
+	xlog_param(xl, "src-y", DEC16, FETCH32(data, 26));
+	{
+	    int pos = 28;
+	    int i = 0;
+
+	    
+	    /*
+	     * We now expect a series of GLYPHITEMs of the
+	     * appropriate size packed tightly together. Each of
+	     * these starts with an 8-byte header consisting of a
+	     * length byte, three padding bytes, and 16-bit delta x
+	     * and y values. If L==255, this is followed by a
+	     * four-byte GLYPHSET identifier; otherwise it's
+	     * followed by L glyph ids of the appropriate size.
+	     */
+	    while (pos < len) {
+		char buf[64];
+		int tilen = FETCH8(data, pos);
+
+		sprintf(buf, "items[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+
+		if (tilen == 255) {
+		    xlog_param(xl, "glyphset", GLYPHSET, FETCH8(data, pos+8));
+		    pos += 12;
+		} else {
+		    xlog_param(xl, "delta-x", DEC16, FETCH16(data, pos+4));
+		    xlog_param(xl, "delta-y", DEC16, FETCH16(data, pos+6));
+		    pos += 8;
+		    switch (req->opcode) {
+		      case EXT_RENDER | 23:
+			xlog_param(xl, "string", HEXSTRING1, tilen,
+				   STRING(data, pos, tilen));
+			pos += tilen;
+			break;
+		      case EXT_RENDER | 24:
+			xlog_param(xl, "string", HEXSTRING2, tilen,
+				   STRING(data, pos, tilen*2));
+			pos += tilen*2;
+			break;
+		      case EXT_RENDER | 25:
+			xlog_param(xl, "string", HEXSTRING4, tilen,
+				   STRING(data, pos, tilen*4));
+			pos += tilen*4;
+			break;
+		    }
+		    pos = (pos + 3) & ~3;
+		}
+
+		xlog_set_end(xl);
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 26:
+	xlog_request_name(xl, req, "RenderFillRectangles", TRUE);
+	xlog_param(xl, "op", ENUM | SPECVAL, FETCH8(data, 4),
+		   "Clear", 0,
+		   "Src", 1,
+		   "Dst", 2,
+		   "Over", 3,
+		   "OverReverse", 4,
+		   "In", 5,
+		   "InReverse", 6,
+		   "Out", 7,
+		   "OutReverse", 8,
+		   "Atop", 9,
+		   "AtopReverse", 10,
+		   "Xor", 11,
+		   "Add", 12,
+		   "Saturate", 13,
+		   "DisjointClear", 0x10,
+		   "DisjointSrc", 0x11,
+		   "DisjointDst", 0x12,
+		   "DisjointOver", 0x13,
+		   "DisjointOverReverse", 0x14,
+		   "DisjointIn", 0x15,
+		   "DisjointInReverse", 0x16,
+		   "DisjointOut", 0x17,
+		   "DisjointOutReverse", 0x18,
+		   "DisjointAtop", 0x19,
+		   "DisjointAtopReverse", 0x1a,
+		   "DisjointXor", 0x1b,
+		   "ConjointClear", 0x20,
+		   "ConjointSrc", 0x21,
+		   "ConjointDst", 0x22,
+		   "ConjointOver", 0x23,
+		   "ConjointOverReverse", 0x24,
+		   "ConjointIn", 0x25,
+		   "ConjointInReverse", 0x26,
+		   "ConjointOut", 0x27,
+		   "ConjointOutReverse", 0x28,
+		   "ConjointAtop", 0x29,
+		   "ConjointAtopReverse", 0x2a,
+		   "ConjointXor", 0x2b);
+	xlog_param(xl, "dst", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "color", SETBEGIN);
+	xlog_param(xl, "red", HEX16, FETCH16(data, 12));
+	xlog_param(xl, "green", HEX16, FETCH16(data, 14));
+	xlog_param(xl, "blue", HEX16, FETCH16(data, 16));
+	xlog_param(xl, "alpha", HEX16, FETCH16(data, 18));
+	xlog_set_end(xl);
+	{
+	    int pos = 20;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 8 <= len) {
+		sprintf(buf, "rectangles[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_rectangle(xl, data, len, pos);
+		xlog_set_end(xl);
+		pos += 8;
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 27:
+	xlog_request_name(xl, req, "RenderCreateCursor", TRUE);
+	xlog_param(xl, "cid", CURSOR, FETCH32(data, 4));
+	xlog_param(xl, "src", PICTURE, FETCH32(data, 8));
+	xlog_param(xl, "x", DECU, FETCH16(data, 12));
+	xlog_param(xl, "y", DECU, FETCH16(data, 14));
+	break;
+      case EXT_RENDER | 28:
+	xlog_request_name(xl, req, "RenderSetPictureTransform", TRUE);
+	xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
+	xlog_param(xl, "transform", SETBEGIN);
+	xlog_param(xl, "p11", FIXED, FETCH32(data, 8));
+	xlog_param(xl, "p12", FIXED, FETCH32(data, 12));
+	xlog_param(xl, "p13", FIXED, FETCH32(data, 16));
+	xlog_param(xl, "p21", FIXED, FETCH32(data, 20));
+	xlog_param(xl, "p22", FIXED, FETCH32(data, 24));
+	xlog_param(xl, "p23", FIXED, FETCH32(data, 28));
+	xlog_param(xl, "p31", FIXED, FETCH32(data, 32));
+	xlog_param(xl, "p32", FIXED, FETCH32(data, 36));
+	xlog_param(xl, "p33", FIXED, FETCH32(data, 40));
+	xlog_set_end(xl);
+	break;
+      case EXT_RENDER | 29:
+	xlog_request_name(xl, req, "RenderQueryFilters", TRUE);
+	xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
+	break;
+      case EXT_RENDER | 30:
+	xlog_request_name(xl, req, "RenderSetPictureFilter", TRUE);
+	xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
+	xlog_param(xl, "name", STRING, FETCH16(data, 8),
+		   STRING(data, 12, FETCH16(data, 8)));
+	{
+	    int pos = (12 + FETCH16(data, 8) + 3) & ~3;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 4 <= len) {
+		sprintf(buf, "values[%d]", i);
+		xlog_param(xl, buf, FIXED, FETCH32(data, pos));
+		pos += 4;
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 31:
+	xlog_request_name(xl, req, "RenderCreateAnimCursor", TRUE);
+	xlog_param(xl, "cid", CURSOR, FETCH32(data, 4));
+	{
+	    int pos = 8;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 8 <= len) {
+		sprintf(buf, "cursors[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "cursor", CURSOR, FETCH32(data, pos));
+		xlog_param(xl, "delay", DECU, FETCH32(data, pos+4));
+		xlog_set_end(xl);
+		pos += 8;
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 32:
+	xlog_request_name(xl, req, "RenderAddTraps", TRUE);
+	xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
+	xlog_param(xl, "off-x", DEC16, FETCH16(data, 8));
+	xlog_param(xl, "off-y", DEC16, FETCH16(data, 10));
+	{
+	    int pos = 12;
+	    int i = 0;
+	    char buf[64];
+	    while (pos + 24 <= len) {
+		sprintf(buf, "trapezoids[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "top", SETBEGIN);
+		xlog_param(xl, "l", FIXED, FETCH32(data, pos));
+		xlog_param(xl, "r", FIXED, FETCH32(data, pos+4));
+		xlog_param(xl, "y", FIXED, FETCH32(data, pos+8));
+		xlog_set_end(xl);
+		pos += 12;
+		xlog_param(xl, "bot", SETBEGIN);
+		xlog_param(xl, "l", FIXED, FETCH32(data, pos));
+		xlog_param(xl, "r", FIXED, FETCH32(data, pos+4));
+		xlog_param(xl, "y", FIXED, FETCH32(data, pos+8));
+		xlog_set_end(xl);
+		pos += 12;
+		xlog_set_end(xl);
+		i++;
+		if (pos < len && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 33:
+	xlog_request_name(xl, req, "RenderCreateSolidFill", TRUE);
+	xlog_param(xl, "pid", PICTURE, FETCH32(data, 4));
+	xlog_param(xl, "color", SETBEGIN);
+	xlog_param(xl, "red", HEX16, FETCH16(data, 8));
+	xlog_param(xl, "green", HEX16, FETCH16(data, 10));
+	xlog_param(xl, "blue", HEX16, FETCH16(data, 12));
+	xlog_param(xl, "alpha", HEX16, FETCH16(data, 14));
+	xlog_set_end(xl);
+	break;
+      case EXT_RENDER | 34:
+      case EXT_RENDER | 35:
+      case EXT_RENDER | 36:
+	{
+	    int pos, n, i;
+	    char buf[64];
+
+	    switch (req->opcode) {
+	      case EXT_RENDER | 34:
+		xlog_request_name(xl, req, "RenderCreateLinearGradient", TRUE);
+		xlog_param(xl, "pid", PICTURE, FETCH32(data, 4));
+		xlog_param(xl, "p1", SETBEGIN);
+		xlog_param(xl, "x", FIXED, FETCH32(data, 8));
+		xlog_param(xl, "y", FIXED, FETCH32(data, 12));
+		xlog_set_end(xl);
+		xlog_param(xl, "p2", SETBEGIN);
+		xlog_param(xl, "x", FIXED, FETCH32(data, 16));
+		xlog_param(xl, "y", FIXED, FETCH32(data, 20));
+		xlog_set_end(xl);
+		pos = 28;
+		break;
+	      case EXT_RENDER | 35:
+		xlog_request_name(xl, req, "RenderCreateRadialGradient", TRUE);
+		xlog_param(xl, "pid", PICTURE, FETCH32(data, 4));
+		xlog_param(xl, "inner_center", SETBEGIN);
+		xlog_param(xl, "x", FIXED, FETCH32(data, 8));
+		xlog_param(xl, "y", FIXED, FETCH32(data, 12));
+		xlog_set_end(xl);
+		xlog_param(xl, "outer_center", SETBEGIN);
+		xlog_param(xl, "x", FIXED, FETCH32(data, 16));
+		xlog_param(xl, "y", FIXED, FETCH32(data, 20));
+		xlog_set_end(xl);
+		xlog_param(xl, "inner_radius", FIXED, FETCH32(data, 24));
+		xlog_param(xl, "outer_radius", FIXED, FETCH32(data, 28));
+		pos = 36;
+		break;
+	      default /* case EXT_RENDER | 36 */:
+		xlog_request_name(xl, req, "RenderCreateConicalGradient", TRUE);
+		xlog_param(xl, "pid", PICTURE, FETCH32(data, 4));
+		xlog_param(xl, "center", SETBEGIN);
+		xlog_param(xl, "x", FIXED, FETCH32(data, 8));
+		xlog_param(xl, "y", FIXED, FETCH32(data, 12));
+		xlog_set_end(xl);
+		xlog_param(xl, "angle", FIXED, FETCH32(data, 16));
+		pos = 24;
+		break;
+	    }
+
+	    n = FETCH32(data, pos-4);
+	    
+	    for (i = 0; i < n; i++) {
+		sprintf(buf, "stops[%d]", i);
+		xlog_param(xl, buf, FIXED, FETCH32(data, pos));
+		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+
+	    for (i = 0; i < n; i++) {
+		sprintf(buf, "stop_colors[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "red", HEX16, FETCH16(data, pos));
+		xlog_param(xl, "green", HEX16, FETCH16(data, pos+2));
+		xlog_param(xl, "blue", HEX16, FETCH16(data, pos+4));
+		xlog_param(xl, "alpha", HEX16, FETCH16(data, pos+6));
+		xlog_set_end(xl);
+		pos += 8;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
 	break;
 
       default:
@@ -3133,12 +4417,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 		sprintf(buf, "%d:UnknownExtensionRequest%d",
 			data[0], data[1]);
 	    }
-	    xlog_request_name(xl, buf);
+	    xlog_request_name(xl, req, buf, FALSE);
 	    xlog_param(xl, "bytes", DECU, len);
 	} else {
 	    char buf[64];
 	    sprintf(buf, "UnknownRequest%d", data[0]);
-	    xlog_request_name(xl, buf);
+	    xlog_request_name(xl, req, buf, FALSE);
 	    xlog_param(xl, "bytes", DECU, len);
 	}
 	break;
@@ -3152,7 +4436,7 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
     const unsigned char *data = (const unsigned char *)vdata;
 
     if (data && !req) {
-	xlog_new_line();
+	xlog_new_line(xl);
 	fprintf(xlogfp, "--- reply received for unknown request sequence"
 		" number %lu\n", (unsigned long)FETCH16(data, 2));
 	fflush(xlogfp);
@@ -3162,7 +4446,7 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
     xl->textbuflen = 0;
     xl->overflow = FALSE;
 
-    xlog_respond_to(req);
+    xlog_respond_to(xl, req);
 
     if (req->replies == 2)
 	req->replies = 3;	       /* we've now seen a reply */
@@ -3254,6 +4538,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "children[%d]", i);
 		xlog_param(xl, buf, WINDOW, FETCH32(data, pos));
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3309,6 +4595,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "atoms[%d]", i);
 		xlog_param(xl, buf, ATOM, FETCH32(data, pos));
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3354,6 +4642,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		xlog_timecoord(xl, data, len, pos);
 		xlog_set_end(xl);
 		pos += 8;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3383,6 +4673,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "keys[%d]", i);
 		xlog_param(xl, buf, DECU, FETCH8(data, pos));
 		pos++;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3408,15 +4700,21 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	    int pos = 32;
 	    int i = 0;
 	    int n;
+	    int printing;
 	    char buf[64];
 
 	    n = FETCH16(data, 46);
+	    printing = TRUE;
 	    for (i = 0; i < n; i++) {
-		sprintf(buf, "properties[%d]", i);
-		xlog_param(xl, buf, SETBEGIN);
-		xlog_fontprop(xl, data, len, pos);
-		xlog_set_end(xl);
+		if (printing) {
+		    sprintf(buf, "properties[%d]", i);
+		    xlog_param(xl, buf, SETBEGIN);
+		    xlog_fontprop(xl, data, len, pos);
+		    xlog_set_end(xl);
+		}
 		pos += 8;
+		if (printing && i+1 < n && xlog_check_list_length(xl))
+		    printing = FALSE;
 	    }
 	    n = FETCH32(data, 56);
 	    for (i = 0; i < n; i++) {
@@ -3425,6 +4723,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		xlog_charinfo(xl, data, len, pos);
 		xlog_set_end(xl);
 		pos += 12;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3454,6 +4754,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		slen = FETCH8(data, pos);
 		xlog_param(xl, buf, STRING, slen, STRING(data, pos+1, slen));
 		pos += slen + 1;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3494,6 +4796,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		xlog_fontprop(xl, data, len, pos);
 		xlog_set_end(xl);
 		pos += 8;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	xlog_param(xl, "replies-hint", DEC16, FETCH32(data, 56));
@@ -3512,6 +4816,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		slen = FETCH8(data, pos);
 		xlog_param(xl, buf, STRING, slen, STRING(data, pos+1, slen));
 		pos += slen + 1;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3520,7 +4826,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "depth", DECU, FETCH8(data, 1));
 	xlog_param(xl, "visual", VISUALID | SPECVAL, FETCH32(data, 8),
 		   "None", 0, (char *)NULL);
-	/* FIXME: the actual image data is not currently logged */
+	xlog_image_data(xl, "image-data", data, len, 32, req->pixmapformat,
+			req->pixmapwidth, req->pixmapheight, FETCH8(data, 1));
 	break;
       case 83:
 	/* ListInstalledColormaps */
@@ -3534,6 +4841,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "cmaps[%d]", i);
 		xlog_param(xl, buf, COLORMAP, FETCH32(data, pos));
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3559,13 +4868,19 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	{
 	    int i, n;
 	    int pos = 32;
+	    int printing;
 
 	    n = FETCH16(data, 8);
+	    printing = TRUE;
 	    for (i = 0; i < n; i++) {
-		char buf[64];
-		sprintf(buf, "pixels[%d]", i);
-		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
+		if (printing) {
+		    char buf[64];
+		    sprintf(buf, "pixels[%d]", i);
+		    xlog_param(xl, buf, HEX32, FETCH32(data, pos));
+		}
 		pos += 4;
+		if (printing && i+1 < n && xlog_check_list_length(xl))
+		    printing = FALSE;
 	    }
 	    n = FETCH16(data, 10);
 	    for (i = 0; i < n; i++) {
@@ -3573,6 +4888,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "masks[%d]", i);
 		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3588,6 +4905,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "pixels[%d]", i);
 		xlog_param(xl, buf, HEX32, FETCH32(data, pos));
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	xlog_param(xl, "red-mask", HEX32, FETCH32(data, 12));
@@ -3610,6 +4929,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		xlog_param(xl, "blue", HEX16, FETCH16(data, pos+4));
 		xlog_set_end(xl);
 		pos += 4;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3674,6 +4995,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		slen = FETCH8(data, pos);
 		xlog_param(xl, buf, STRING, slen, STRING(data, pos+1, slen));
 		pos += slen + 1;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3699,6 +5022,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		i++;
 		keycode++;
 		keycode_count--;
+		if (keycode_count > 0 && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3721,6 +5046,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "auto-repeats[%d]", i);
 		xlog_param(xl, buf, HEX8, FETCH8(data, pos));
 		pos++;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3755,10 +5082,12 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		xlog_param(xl, "family", ENUM | SPECVAL, FETCH8(data, pos),
 			   "Internet", 0, "DECnet", 1, "Chaos", 2,
 			   (char *)NULL);
-		xlog_param(xl, "address", HEXSTRING, FETCH16(data, pos+2),
+		xlog_param(xl, "address", HEXSTRING1, FETCH16(data, pos+2),
 			   STRING(data, pos+4, FETCH16(data, pos+2)));
 		xlog_set_end(xl);
 		pos += 4 + ((FETCH16(data, pos+2) + 3) &~ 3);
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3778,6 +5107,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		sprintf(buf, "map[%d]", i);
 		xlog_param(xl, buf, DECU, FETCH8(data, pos));
 		pos++;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3803,6 +5134,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		    pos++;
 		}
 		xlog_set_end(xl);
+		if (mod+1 < 8 && xlog_check_list_length(xl))
+		    break;
 	    }
 	}
 	break;
@@ -3829,6 +5162,193 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "size", DECU, FETCH32(data, 12));
 	break;
 
+      case EXT_RENDER | 0:
+	/* RenderQueryVersion */
+	xlog_param(xl, "major-version", DECU, FETCH32(data, 8));
+	xlog_param(xl, "minor-version", DECU, FETCH32(data, 12));
+	break;
+      case EXT_RENDER | 1:
+	/* RenderQueryPictFormats */
+	{
+	    int i, n;
+	    int pos;
+
+	    /*
+	     * Go through the list of picture formats and save the
+	     * depth of each one.
+	     */
+	    n = FETCH32(data, 8);
+	    pos = 32;
+	    for (i = 0; i < n; i++) {
+		struct resdepth *gsd;
+		struct resdepth *old;
+
+		gsd = snew(struct resdepth);
+		gsd->resource = FETCH32(data, pos);
+		gsd->depth = FETCH8(data, pos+5);
+		/*
+		 * Find any previous entry for this resource id, and
+		 * override it.
+		 */
+		old = del234(xl->resdepths, gsd);
+		sfree(old);
+		/*
+		 * Now add the new one.
+		 */
+		add234(xl->resdepths, gsd);
+
+		pos += 28;
+	    }
+
+	    /*
+	     * Now reset pos, and log stuff as usual.
+	     */
+
+	    n = FETCH32(data, 8);
+	    pos = 32;
+	    for (i = 0; i < n; i++) {
+		char buf[64];
+		sprintf(buf, "formats[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "id", PICTFORMAT, FETCH32(data, pos));
+		xlog_param(xl, "type", ENUM | SPECVAL, FETCH8(data, pos+4),
+			   "Indexed", 0, "Direct", 1, (char *)NULL);
+		xlog_param(xl, "depth", DECU, FETCH8(data, pos+5));
+		xlog_param(xl, "direct", SETBEGIN);
+		xlog_param(xl, "red-shift", DECU, FETCH16(data, pos+8));
+		xlog_param(xl, "red-mask", HEX16, FETCH16(data, pos+10));
+		xlog_param(xl, "green-shift", DECU, FETCH16(data, pos+12));
+		xlog_param(xl, "green-mask", HEX16, FETCH16(data, pos+14));
+		xlog_param(xl, "blue-shift", DECU, FETCH16(data, pos+16));
+		xlog_param(xl, "blue-mask", HEX16, FETCH16(data, pos+18));
+		xlog_param(xl, "alpha-shift", DECU, FETCH16(data, pos+20));
+		xlog_param(xl, "alpha-mask", HEX16, FETCH16(data, pos+22));
+		xlog_set_end(xl);
+		xlog_param(xl, "colormap", COLORMAP | SPECVAL,
+			   FETCH32(data, pos+24), "None", 0, (char *)NULL);
+		xlog_set_end(xl);
+		pos += 28;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+
+	    n = FETCH32(data, 12);
+	    for (i = 0; i < n; i++) {
+		char buf[64];
+		int m, j, opos = pos;
+		sprintf(buf, "screens[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		m = FETCH32(data, pos);
+		pos += 8;
+		for (j = 0; j < m; j++) {
+		    int l, k;
+		    sprintf(buf, "depths[%d]", j);
+		    xlog_param(xl, buf, SETBEGIN);
+		    xlog_param(xl, "depth", DECU, FETCH8(data, pos));
+		    l = FETCH16(data, pos+2);
+		    pos += 8;
+		    for (k = 0; k < l; k++) {
+			sprintf(buf, "visuals[%d]", k);
+			xlog_param(xl, buf, SETBEGIN);
+			xlog_param(xl, "visual", VISUALID | SPECVAL,
+				   FETCH32(data, pos), "None",0, (char *)NULL);
+			xlog_param(xl, "format", PICTFORMAT,
+				   FETCH32(data, pos+4));
+			xlog_set_end(xl);
+			pos += 8;
+			if (k+1 < l && xlog_check_list_length(xl))
+			    break;
+		    }
+		    xlog_set_end(xl);
+		    if (j+1 < m && xlog_check_list_length(xl))
+			break;
+		}
+		xlog_param(xl, "fallback", PICTFORMAT, FETCH32(data, opos+4));
+		xlog_set_end(xl);
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+
+	    /*
+	     * FIXME: we ought to check the version from
+	     * RenderQueryVersion and use it to make this piece
+	     * conditional.
+	     */
+	    n = FETCH32(data, 24);
+	    for (i = 0; i < n; i++) {
+		char buf[64];
+		sprintf(buf, "subpixels[%d]", i);
+		xlog_param(xl, buf, ENUM | SPECVAL, FETCH8(data, pos),
+			   "Unknown",0, "HorizontalRGB",1, "HorizontalBGR",2,
+			   "VerticalRGB",3, "VerticalBGR",4, "None",5,
+			   (char *)NULL);
+		pos++;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+
+	break;
+      case EXT_RENDER | 2:
+	/* RenderQueryPictIndexValues */
+	{
+	    int i, n;
+	    int pos = 32;
+
+	    n = FETCH32(data, 8);
+	    for (i = 0; i < n; i++) {
+		char buf[64];
+		sprintf(buf, "values[%d]", i);
+		xlog_param(xl, buf, SETBEGIN);
+		xlog_param(xl, "pixel", HEX32, FETCH32(data, pos));
+		xlog_param(xl, "red", HEX16, FETCH16(data, pos+4));
+		xlog_param(xl, "green", HEX16, FETCH16(data, pos+6));
+		xlog_param(xl, "blue", HEX16, FETCH16(data, pos+8));
+		xlog_param(xl, "alpha", HEX16, FETCH16(data, pos+10));
+		xlog_set_end(xl);
+		pos += 12;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+      case EXT_RENDER | 3:
+	/* RenderQueryDithers */
+	/*
+	 * This request is listed in renderproto/render.h but does
+	 * not include any description, so we'll just have to log it
+	 * as 'unable to decode reply data'.
+	 */
+	break;
+      case EXT_RENDER | 29:
+	/* RenderQueryFilters */
+	{
+	    int i, n;
+	    int pos = 32;
+
+	    n = FETCH32(data, 8);
+	    for (i = 0; i < n; i++) {
+		char buf[64];
+		sprintf(buf, "aliases[%d]", i);
+		xlog_param(xl, buf, DECU, FETCH16(data, pos));
+		pos += 2;
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+
+	    n = FETCH32(data, 12);
+	    for (i = 0; i < n; i++) {
+		char buf[64];
+		sprintf(buf, "filters[%d]", i);
+		xlog_param(xl, buf, STRING, FETCH8(data, pos),
+			   STRING(data, pos+1, FETCH8(data, pos)));
+		pos += 1 + FETCH8(data, pos);
+		if (i+1 < n && xlog_check_list_length(xl))
+		    break;
+	    }
+	}
+	break;
+
       default:
 	xlog_printf(xl, "<unable to decode reply data>");
 	break;
@@ -3836,7 +5356,7 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 
     if (xl->textbuflen) {
 	xlog_reply_end(xl);
-	xlog_response_done(xl->textbuf);
+	xlog_response_done(req, xl->textbuf);
     }
 
     if (req->replies == 1) {
@@ -3889,6 +5409,16 @@ const char *xlog_translate_error(int errcode)
 	return "BadImplementation";
       case EXT_MITSHM | 0:
 	return "BadShmSeg";
+      case EXT_RENDER | 0:
+	return "BadPictFormat";
+      case EXT_RENDER | 1:
+	return "BadPicture";
+      case EXT_RENDER | 2:
+	return "BadPictOp";
+      case EXT_RENDER | 3:
+	return "BadGlyphSet";
+      case EXT_RENDER | 4:
+	return "BadGlyph";
       default:
 	return NULL;
     }
@@ -3904,7 +5434,7 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     xl->textbuflen = 0;
     xl->overflow = FALSE;
 
-    xlog_respond_to(req);
+    xlog_respond_to(xl, req);
 
     xl->reqlogstate = 3;	       /* for things with parameters */
 
@@ -4022,7 +5552,7 @@ void xlog_do_error(struct xlog *xl, struct request *req,
 	break;
     }
 
-    xlog_response_done(xl->textbuf);
+    xlog_response_done(req, xl->textbuf);
 
     /*
      * Dequeue this request, now we've seen an error response to it.
@@ -4041,15 +5571,50 @@ void xlog_do_error(struct xlog *xl, struct request *req,
 void xlog_do_event(struct xlog *xl, const void *vdata, int len)
 {
     const unsigned char *data = (const unsigned char *)vdata;
+    int filter;
 
     xl->textbuflen = 0;
     xl->overflow = FALSE;
 
-    xlog_event(xl, data, len, 0);
+    xlog_event(xl, data, len, 0, &filter);
 
-    xlog_new_line();
-    fprintf(xlogfp, "--- %s\n", xl->textbuf);
-    fflush(xlogfp);
+    if (filter) {
+	xlog_new_line(xl);
+	fprintf(xlogfp, "--- %s\n", xl->textbuf);
+	fflush(xlogfp);
+    }
+}
+
+void hexdump(struct xlog *xl, const void *vdata, int len,
+	     unsigned startoffset, const char *prefix)
+{
+    const unsigned char *data = (const unsigned char *)vdata;
+    unsigned lineoffset = startoffset &~ 15;
+    char dumpbuf[128], tmpbuf[16];
+    int n, i;
+    unsigned char c;
+
+    for (n = -(int)(startoffset & 15); n < len; n += 16) {
+	memset(dumpbuf, ' ', 8+2+16*3+1+16);
+	dumpbuf[8+2+16*3+1+16] = '\n';
+	dumpbuf[8+2+16*3+1+16+1] = '\0';
+	memcpy(dumpbuf, tmpbuf, sprintf(tmpbuf, "%08X", lineoffset));
+	for (i = 0; i < 16; i++) {
+	    if (i + n < 0)
+		continue;
+	    if (i + n >= len)
+		break;
+	    c = data[i + n];
+	    memcpy(dumpbuf+8+2+3*i, tmpbuf, sprintf(tmpbuf, "%02X", c));
+	    dumpbuf[8+2+16*3+1+i] = (isprint(c) ? c : '.');
+	}
+	dumpbuf[8+2+16*3+1+i] = '\n';
+	dumpbuf[8+2+16*3+1+i+1] = '\0';
+	xlog_new_line(xl);
+	fputs(prefix, xlogfp);
+	fputs(dumpbuf, xlogfp);
+	lineoffset += 16;
+    }
 }
 
 void xlog_c2s(struct xlog *xl, const void *vdata, int len)
@@ -4061,6 +5626,11 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
      * ignore().
      */
     int i;
+
+    if (raw_hex_dump) {
+	hexdump(xl, vdata, len, xl->c2soff, ">>> ");
+	xl->c2soff += len;
+    }
 
     if (xl->error)
 	return;
@@ -4147,6 +5717,11 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
      */
     int i;
 
+    if (raw_hex_dump) {
+	hexdump(xl, vdata, len, xl->s2coff, "<<< ");
+	xl->s2coff += len;
+    }
+
     if (xl->error)
 	return;
 
@@ -4190,22 +5765,205 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 	     */
 	    if (xl->s2cbuf[0] == 0)
 		err((xl, "server refused authorisation, reason \"%.*s\"",
-		     xl->s2cbuf + 8, min(xl->s2clen-8, xl->s2cbuf[1])));
+		     min(xl->s2clen-8, xl->s2cbuf[1]), xl->s2cbuf + 8));
 	    else if (xl->s2cbuf[0] == 2)
 		err((xl, "server sent incomplete-authorisation packet, which"
-		     " is unsupported by xtrace"));
+		     " is unsupported by xtruss"));
 	    else if (xl->s2cbuf[0] != 1)
 		err((xl, "server sent unrecognised authorisation-time opcode %d",
 		     xl->s2cbuf[0]));
 
 	    /*
 	     * Now we're sitting on a successful authorisation
-	     * packet. FIXME: we might usefully log some of its
-	     * contents, though probably optionally. Even if we
-	     * don't, we could at least save some resource ids -
-	     * windows, colormaps, visuals and so on - to lend
-	     * context to logging of later requests which cite them.
+	     * packet. Optionally log it.
 	     */
+	    if (xl->s2clen < 16) {
+		err((xl, "server's init message was far too short\n"));
+	    }
+	    xl->clientid = READ32(xl->s2cbuf + 12);
+	    if (++num_clients_seen > 1)
+		print_client_ids = TRUE;
+
+	    if (print_server_startup) {
+		/* variables on which the FETCH macros depend */
+		const unsigned char *data = xl->s2cbuf;
+		int len = xl->s2clen;
+
+		xl->textbuflen = 0;
+		xlog_printf(xl, "--- server init message: ");
+		xl->reqlogstate = 3;
+
+		xlog_param(xl, "protocol-major-version", DECU,
+			   FETCH16(data, 2));
+		xlog_param(xl, "protocol-major-version", DECU,
+			   FETCH16(data, 4));
+		xlog_param(xl, "release-number", DECU, FETCH32(data, 8));
+		xlog_param(xl, "resource-id-base", HEX32, FETCH32(data, 12));
+		xlog_param(xl, "resource-id-mask", HEX32, FETCH32(data, 16));
+		xlog_param(xl, "motion-buffer-size", DECU, FETCH32(data, 20));
+		xlog_param(xl, "maximum-request-length", DECU,
+			   FETCH16(data, 26));
+		xlog_param(xl, "image-byte-order", ENUM | SPECVAL,
+			   FETCH8(data, 30), "LSBFirst", 0,
+			   "MSBFirst", 1, (char *)NULL);
+		xlog_param(xl, "bitmap-bit-order", ENUM | SPECVAL,
+			   FETCH8(data, 31), "LeastSignificant", 0,
+			   "MostSignificant", 1, (char *)NULL);
+		xlog_param(xl, "bitmap-scanline-unit", DECU,
+			   FETCH8(data, 32));
+		xlog_param(xl, "bitmap-scanline-pad", DECU,
+			   FETCH8(data, 33));
+		xlog_param(xl, "min-keycode", DECU,
+			   FETCH8(data, 34));
+		xlog_param(xl, "max-keycode", DECU,
+			   FETCH8(data, 35));
+		xlog_param(xl, "vendor", STRING, FETCH16(data, 24),
+			   STRING(data, 40, FETCH16(data, 24)));
+
+		{
+		    int i, n;
+		    int pos = 40 + FETCH16(data, 24);
+		    int printing;
+		    pos = (pos + 3) &~ 3;
+
+		    n = FETCH8(data, 29);
+		    printing = TRUE;
+		    for (i = 0; i < n; i++) {
+			if (printing) {
+			    char buf[64];
+			    sprintf(buf, "pixmap-formats[%d]", i);
+			    xlog_param(xl, buf, SETBEGIN);
+			    xlog_param(xl, "depth", DECU, FETCH8(data, pos));
+			    xlog_param(xl, "bits-per-pixel", DECU,
+				       FETCH8(data, pos+1));
+			    xlog_param(xl, "scanline-pad", DECU,
+				       FETCH8(data, pos+2));
+			    xlog_set_end(xl);
+			}
+			pos += 8;
+			if (printing && i+1 < n && xlog_check_list_length(xl))
+			    printing = FALSE;
+		    }
+
+		    n = FETCH8(data, 28);
+		    for (i = 0; i < n; i++) {
+			char buf[64];
+			int j, m;
+			sprintf(buf, "roots[%d]", i);
+			xlog_param(xl, buf, SETBEGIN);
+			xlog_param(xl, "root", WINDOW, FETCH32(data, pos));
+			xlog_param(xl, "default-colormap", COLORMAP,
+				   FETCH32(data, pos+4));
+			xlog_param(xl, "white-pixel", HEX32,
+				   FETCH32(data, pos+8));
+			xlog_param(xl, "black-pixel", HEX32,
+				   FETCH32(data, pos+12));
+			xlog_param(xl, "current-input-masks", EVENTMASK,
+				   FETCH32(data, pos+16));
+			xlog_param(xl, "width-in-pixels", DECU,
+				   FETCH16(data, pos+20));
+			xlog_param(xl, "height-in-pixels", DECU,
+				   FETCH16(data, pos+22));
+			xlog_param(xl, "width-in-mm", DECU,
+				   FETCH16(data, pos+24));
+			xlog_param(xl, "height-in-mm", DECU,
+				   FETCH16(data, pos+26));
+			xlog_param(xl, "min-installed-maps", DECU,
+				   FETCH16(data, pos+28));
+			xlog_param(xl, "max-installed-maps", DECU,
+				   FETCH16(data, pos+30));
+			xlog_param(xl, "root-visual", VISUALID,
+				   FETCH32(data, pos+32));
+			xlog_param(xl, "backing-stores", ENUM | SPECVAL,
+				   FETCH8(data, pos+36), "Never", 0,
+				   "WhenMapped", 1, "Always", 2, (char *)NULL);
+			xlog_param(xl, "save-unders", BOOLEAN,
+				   FETCH8(data, pos+37));
+			xlog_param(xl, "root-depth", DECU,
+				   FETCH8(data, pos+38));
+			m = FETCH8(data, pos+39);
+			pos += 40;
+			for (j = 0; j < m; j++) {
+			    char buf[64];
+			    int k, l;
+			    sprintf(buf, "allowed-depths[%d]", j);
+			    xlog_param(xl, buf, SETBEGIN);
+			    xlog_param(xl, "depth", DECU,
+				       FETCH8(data, pos));
+			    l = FETCH16(data, pos+2);
+			    pos += 8;
+			    for (k = 0; k < l; k++) {
+				char buf[64];
+				sprintf(buf, "visuals[%d]", k);
+				xlog_param(xl, buf, SETBEGIN);
+				xlog_param(xl, "visual-id", VISUALID,
+					   FETCH32(data, pos));
+				xlog_param(xl, "class", ENUM | SPECVAL,
+					   FETCH8(data, pos + 4),
+					   "StaticGray", 0, "GrayScale", 1,
+					   "StaticColor", 2, "PseudoColor", 3,
+					   "TrueColor", 4, "DirectColor", 5,
+					   (char *)NULL);
+				xlog_param(xl, "bits-per-rgb-value", DECU,
+					   FETCH8(data, pos + 5));
+				xlog_param(xl, "colormap-entries", DECU,
+					   FETCH16(data, pos + 6));
+				xlog_param(xl, "red-mask", HEX32,
+					   FETCH32(data, pos + 8));
+				xlog_param(xl, "green-mask", HEX32,
+					   FETCH32(data, pos + 12));
+				xlog_param(xl, "blue-mask", HEX32,
+					   FETCH32(data, pos + 16));
+				xlog_set_end(xl);
+				pos += 24;
+				if (k+1 < l && xlog_check_list_length(xl))
+				    break;
+			    }
+			    xlog_set_end(xl);
+			    if (j+1 < m && xlog_check_list_length(xl))
+				break;
+			}
+			xlog_set_end(xl);
+			if (i+1 < n && xlog_check_list_length(xl))
+			    break;
+		    }
+		}
+
+		xlog_new_line(xl);
+		fprintf(xlogfp, "%s\n", xl->textbuf);
+	    }
+
+	    /*
+	     * Find all the pixmap format information we might need
+	     * to decode PutImage and GetImage requests during the
+	     * protocol.
+	     */
+	    {
+		/* variables on which the FETCH macros depend */
+		const unsigned char *data = xl->s2cbuf;
+		int len = xl->s2clen;
+
+		xl->bitmap_scanline_unit = FETCH8(data, 32);
+		xl->bitmap_scanline_pad = FETCH8(data, 33);
+		xl->image_byte_order = FETCH8(data, 30);
+		xl->npixmapformats = FETCH8(data, 29);
+		xl->pixmapformats = snewn(xl->npixmapformats,
+					  struct pixmapformat);
+		{
+		    int pos = 40 + FETCH16(data, 24);
+		    pos = (pos + 3) &~ 3;
+
+		    for (i = 0; i < xl->npixmapformats; i++) {
+			xl->pixmapformats[i].depth =
+			    FETCH8(data, pos);
+			xl->pixmapformats[i].bits_per_pixel =
+			    FETCH8(data, pos+1);
+			xl->pixmapformats[i].scanline_pad =
+			    FETCH8(data, pos+2);
+			pos += 8;
+		    }
+		}
+	    }
 	    break;
 	}
     }
@@ -4240,12 +5998,14 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 	 * is to discard outstanding requests from our stored list
 	 * until we reach the one to which this packet refers.
 	 *
-	 * The sole known exception to this is the KeymapNotify
-	 * event. FIXME: should we revise this so it's not
-	 * centralised after all, in case extension-defined events
-	 * break this invariant further?
+	 * The sole _known_ exception to this is the KeymapNotify
+	 * event, but we also treat extension events we don't
+	 * recognise as potential exceptions.
 	 */
-	if (xl->s2cbuf[0] != 11) {
+	if ((xl->s2cbuf[0] & 0x7f) != 11 &&
+	    (xl->s2cbuf[0] < 2 ||
+	     xl->extidevents[xl->s2cbuf[0] & 0x7f] ||
+	     xlog_translate_event(xl->s2cbuf[0] & 0x7f))) {
 	    i = READ16(xl->s2cbuf + 2);
 	    while (xl->rhead && (xl->rhead->seqnum & 0xFFFF) != i) {
 		struct request *nexthead = xl->rhead->next;
@@ -4532,7 +6292,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	int n = c->xrecordbuf[1];
 	if (n > c->xrecordlen - 8)
 	    n = c->xrecordlen - 8;
-	fprintf(stderr, "xtrace: X server denied authentication (\"%.*s\")\n",
+	fprintf(stderr, "xtruss: X server denied authorisation (\"%.*s\")\n",
 		n, c->xrecordbuf + 8);
 	exit(1);
     }
@@ -4580,18 +6340,18 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     if (c->xrecordbuf[0] == 0) { \
 	const char *err = xlog_translate_error(c->xrecordbuf[1]); \
 	if (err) \
-	    fprintf(stderr, "xtrace: X server returned %s error to" \
-		    " RecordQueryVersion\n", err); \
+	    fprintf(stderr, "xtruss: X server returned %s error to" \
+		    " %s\n", err, name); \
 	else \
-	    fprintf(stderr, "xtrace: X server returned unknown error %d to" \
-		    " RecordQueryVersion\n", c->xrecordbuf[1]); \
+	    fprintf(stderr, "xtruss: X server returned unknown error %d to" \
+		    " %s\n", c->xrecordbuf[1], name); \
 	exit(1); \
     } else if (c->xrecordbuf[0] != 1) { \
 	const char *ev = xlog_translate_event(c->xrecordbuf[0]); \
 	if (ev) \
-	    fprintf(stderr, "xtrace: unexpected event received (%s)\n", ev); \
+	    fprintf(stderr, "xtruss: unexpected event received (%s)\n", ev); \
 	else \
-	    fprintf(stderr, "xtrace: unexpected event received (%d)\n", \
+	    fprintf(stderr, "xtruss: unexpected event received (%d)\n", \
 		    c->xrecordbuf[0]); \
 	exit(1); \
     } \
@@ -4599,7 +6359,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 
     EXPECT_REPLY("QueryExtension");
     if (c->xrecordbuf[8] != 1) {
-	fprintf(stderr, "xtrace: cannot use -p: X server does not support"
+	fprintf(stderr, "xtruss: cannot use -p: X server does not support"
 		" the X RECORD extension\n");
 	exit(1);
     }
@@ -4624,7 +6384,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     EXPECT_REPLY("RecordQueryVersion");
 
     if (c->select) {
-	fprintf(stderr, "xtrace: click mouse in a window belonging to the "
+	fprintf(stderr, "xtruss: click mouse in a window belonging to the "
 		"client you want to trace\n");
 
 	/*
@@ -4694,7 +6454,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	      default: sprintf(reason, "unknown error code %d",
 			       c->xrecordbuf[1]); break;
 	    }
-	    fprintf(stderr, "xtrace: could not grab mouse pointer for window"
+	    fprintf(stderr, "xtruss: could not grab mouse pointer for window"
 		    " selection: %s\n", reason);
 	    exit(1);
 	}
@@ -4710,20 +6470,20 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     if (c->xrecordbuf[0] == 0) { \
 	const char *err = xlog_translate_error(c->xrecordbuf[1]); \
 	if (err) \
-	    fprintf(stderr, "xtrace: X server returned unexpected %s " \
+	    fprintf(stderr, "xtruss: X server returned unexpected %s " \
 		    "error\n", err); \
 	else \
-	    fprintf(stderr, "xtrace: X server returned unexpected and " \
+	    fprintf(stderr, "xtruss: X server returned unexpected and " \
 		    "unknown error %d\n", c->xrecordbuf[1]); \
 	exit(1); \
     } else if (c->xrecordbuf[0] == 1) { \
-	fprintf(stderr, "xtrace: unexpected reply received\n"); \
+	fprintf(stderr, "xtruss: unexpected reply received\n"); \
     } else if ((c->xrecordbuf[0] & 0x7F) != num) { \
 	const char *ev = xlog_translate_event(c->xrecordbuf[0]); \
 	if (ev) \
-	    fprintf(stderr, "xtrace: unexpected event received (%s)\n", ev); \
+	    fprintf(stderr, "xtruss: unexpected event received (%s)\n", ev); \
 	else \
-	    fprintf(stderr, "xtrace: unexpected event received (%d)\n", \
+	    fprintf(stderr, "xtruss: unexpected event received (%d)\n", \
 		    c->xrecordbuf[0]); \
 	exit(1); \
     } \
@@ -4900,6 +6660,30 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     buf[47] = 1;		       /* but do want client-died */
     x11_send(c->xs, buf, 48);
 
+    if (print_client_ids) {
+	/*
+	 * If we're unconditionally printing client ids, we should
+	 * call RecordGetContext to find out the official id for the
+	 * client we've just attached to. (If we identified it by an
+	 * actual resource rather than by its resource base, the
+	 * value we already know will have extra bits set.)
+	 */
+	buf[0] = c->xrecordopcode; buf[1] = 4;/* RecordGetContext */
+	PUT_16BIT_MSB_FIRST(buf+2, 2);     /* request length */
+	PUT_32BIT_MSB_FIRST(buf+4, RCID);  /* context id */
+	x11_send(c->xs, buf, 8);
+	do {
+	    read(c, xrecord, 32);
+	    if (c->xrecordbuf[0] == 1)
+		readfrom(c, xrecord,
+			 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
+	} while (c->xrecordbuf[0] > 1);/* ignore events */
+	EXPECT_REPLY("RecordGetContext");
+	if (c->xrecordlen >= 36) {
+	    c->xl->clientid = GET_32BIT_MSB_FIRST(c->xrecordbuf + 32);
+	}
+    }
+
     buf[0] = c->xrecordopcode; buf[1] = 5;/* RecordEnableContext */
     PUT_16BIT_MSB_FIRST(buf+2, 2);     /* request length */
     PUT_32BIT_MSB_FIRST(buf+4, RCID);  /* context id */
@@ -4916,31 +6700,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 		readfrom(c, xrecord,
 			 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
 	} while (c->xrecordbuf[0] > 1);/* ignore events */
-	if (c->xrecordbuf[0] != 1) {
-	    fprintf(stderr, "FIXME: proper error [expected recorded data]\n");
-	    exit(1);
-	}
-#if 0
-/* Hex dump of the received data, kept in case it comes in handy again. */
-{
- int n,k,i;
- char dumpbuf[128], tmpbuf[16];
- fprintf(stderr, "RECORD output type %d:\n", c->xrecordbuf[1]);
- for (n = 32; n < c->xrecordlen; n += 16) {
-  k = c->xrecordlen - n;
-  if (k > 16) k = 16;
-  memset(dumpbuf, ' ', 8+2+16*3+1+k);
-  dumpbuf[8+2+16*3+1+k] = '\n';
-  dumpbuf[8+2+16*3+1+k+1] = '\0';
-  memcpy(dumpbuf, tmpbuf, sprintf(tmpbuf, "%08X", n-32));
-  for (i=0;i<k;i++) {
-   memcpy(dumpbuf+8+2+3*i, tmpbuf, sprintf(tmpbuf, "%02X", c->xrecordbuf[n+i]));
-   dumpbuf[8+2+16*3+1+i] = (isprint(c->xrecordbuf[n+i]) ? c->xrecordbuf[n+i] : '.');
-  }
-  fputs(dumpbuf, stderr);
- }
-}
-#endif
+	EXPECT_REPLY("RecordEnableContext");
 	switch (c->xrecordbuf[1]) {
 	  case 4:
 	    /*
@@ -4972,7 +6732,7 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	     */
 	    exit(0);
 	  default:
-	    fprintf(stderr, "xtrace: unexpected data record type received "
+	    fprintf(stderr, "xtruss: unexpected data record type received "
 		    "(%d)\n", c->xrecordbuf[1]);
 	    break;
 	}
@@ -4980,6 +6740,8 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 
     crFinish;
 }
+
+#undef read /* to avoid shadowing the Unix system call, for the below */
 
 /* ----------------------------------------------------------------------
  * Unix-specific main program.
@@ -5041,7 +6803,107 @@ void write_random_seed(void *data, int len) {}
 const char platform_x11_best_transport[] = "unix";
 
 char *platform_get_x_display(void) {
-    return dupstr(getenv("DISPLAY"));
+    char *disp = getenv("DISPLAY");
+    if (!disp || !*disp) {
+	fprintf(stderr, "xtruss: no X display specified (use -display or"
+		" set DISPLAY\n");
+	exit(1);
+    }
+    return dupstr(disp);
+}
+
+/*
+ * Variant form of strcmp, in which the first argument is
+ * NUL-terminated as usual but the second argument has an explicitly
+ * specified length.
+ */
+static int strzlencmp(const char *az, const char *bl, int blen)
+{
+    while (*az && blen>0) {
+	if (*az != *bl)
+	    return *az < *bl ? -1 : +1;
+	az++, bl++, blen--;
+    }
+    if (!*az && blen==0)
+	return 0;
+    return *az ? +1 : -1;
+}
+
+const char usagemsg[] =
+"  usage: xtruss [options] command [command arguments]       trace a new program\n"
+"     or: xtruss [options] -p <resource id>     trace an X client by resource id\n"
+"     or: xtruss [options] -p -         trace an X client selected interactively\n"
+"options: -s <length>             set approximate limit on line length\n"
+"         -o <file>               send log output to a file (default=stderr)\n"
+"         -e [<class>=][!]<item>[,<item>...]  filter the packets output, where:\n"
+"                <class> is 'requests' or 'events'\n"
+"                <item> is a request or event name, or 'all' or 'none'\n"
+"         -I                      log X server initialisation message\n"
+"         -R                      also give raw hex dump of session traffic\n"
+"         -C                      unconditionally prefix client id to every line\n"
+"         -display <display>      specify X display (overrides $DISPLAY)\n"
+"   also: xtruss --version        report version number\n"
+"         xtruss --help           display this help text\n"
+"         xtruss --licence        display the (MIT) licence text\n"
+;
+
+void usage(FILE *fp) {
+    fputs(usagemsg, fp);
+}
+
+const char licencemsg[] =
+"xtruss is copyright 1997-2009 Simon Tatham.\n"
+"\n"
+"Portions copyright Robert de Bath, Andreas Schultz, Jeroen Massar,\n"
+"Nicolas Barry, Justin Bradford, Ben Harris, Malcolm Smith, Ahmad\n"
+"Khalifa, Colin Watson, and the X Consortium.\n"
+"\n"
+"Permission is hereby granted, free of charge, to any person\n"
+"obtaining a copy of this software and associated documentation files\n"
+"(the \"Software\"), to deal in the Software without restriction,\n"
+"including without limitation the rights to use, copy, modify, merge,\n"
+"publish, distribute, sublicense, and/or sell copies of the Software,\n"
+"and to permit persons to whom the Software is furnished to do so,\n"
+"subject to the following conditions:\n"
+"\n"
+"The above copyright notice and this permission notice shall be\n"
+"included in all copies or substantial portions of the Software.\n"
+"\n"
+"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+"EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n"
+"MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\n"
+"NONINFRINGEMENT.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE\n"
+"FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF\n"
+"CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION\n"
+"WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n"
+"\n"
+"Except as contained in this notice, the name of the X Consortium\n"
+"shall not be used in advertising or otherwise to promote the sale,\n"
+"use or other dealings in this Software without prior written\n"
+"authorization from the X Consortium.\n"
+;
+
+void licence(void) {
+    fputs(licencemsg, stdout);
+}
+
+void version(void) {
+#define SVN_REV "$Revision$"
+    char rev[sizeof(SVN_REV)];
+    char *p, *q;
+
+    strcpy(rev, SVN_REV);
+
+    for (p = rev; *p && *p != ':'; p++);
+    if (*p) {
+        p++;
+        while (*p && isspace(*p)) p++;
+        for (q = p; *q && *q != '$'; q++);
+        if (*q) *q = '\0';
+        printf("xtruss revision %s\n", p);
+    } else {
+        printf("xtruss: unknown version\n");
+    }
 }
 
 int main(int argc, char **argv)
@@ -5064,20 +6926,58 @@ int main(int argc, char **argv)
     xrecord = FALSE;
     selectclient = FALSE;
 
+    requests_to_log.include = FALSE;
+    requests_to_log.strings = newtree234(stringcmp);
+    events_to_log.include = FALSE;
+    events_to_log.strings = newtree234(stringcmp);
+
     cfg.x11_display[0] = '\0';
 
     while (--argc > 0) {
 	char *p = *++argv;
 
 	if (doing_opts && *p == '-') {
+	    if (!strcmp(p, "--help") || !strcmp(p, "-help")) {
+		usage(stdout);
+		return 0;
+	    }
+	    if (!strcmp(p, "--version") || !strcmp(p, "-version")) {
+		version();
+		return 0;
+	    }
+	    if (!strcmp(p, "--licence") || !strcmp(p, "-licence") ||
+		!strcmp(p, "--license") || !strcmp(p, "-license")) {
+		licence();
+		return 0;
+	    }
+	    if (!strcmp(p, "-display")) {
+		char *val;
+
+		if (--argc > 0)
+		    val = *++argv;
+		else {
+		    fprintf(stderr, "xtruss: option \"%s\" expects an"
+			    " argument\n", p);
+		    return 1;
+		}
+
+		if (!strcmp(p, "-display")) {
+		    strncpy(cfg.x11_display, val, lenof(cfg.x11_display)-1);
+		    cfg.x11_display[lenof(cfg.x11_display)-1] = '\0';
+		}
+
+		continue;
+	    }
 	    if (p[1] == '-') {
 		if (!p[2])	       /* "--" terminates option parsing */
 		    doing_opts = FALSE;
 		else {
 		    /* no GNU-style long options currently supported */
-		    fprintf(stderr, "xtrace: unknown option '%s'\n", p);
+		    fprintf(stderr, "xtruss: unknown option '%s'\n", p);
 		    return 1;
 		}
+
+		continue;
 	    }
 	    p++;
 	    while (*p) {
@@ -5085,19 +6985,33 @@ int main(int argc, char **argv)
 		char *val;
 
 		switch (c) {
+		  case 's':
 		  case 'o':
 		  case 'p':
+		  case 'e':
 		    /* options requiring an argument */
-		    if (*p)
+		    if (*p) {
 			val = p;
-		    else if (--argc > 0)
+			p += strlen(p);
+		    } else if (--argc > 0) {
 			val = *++argv;
-		    else {
-			fprintf(stderr, "xtrace: option '-%c' expects an"
+		    } else {
+			fprintf(stderr, "xtruss: option '-%c' expects an"
 				" argument\n", c);
 			return 1;
 		    }
 		    switch (c) {
+		      case 's':
+			if (!strcasecmp(val, "infinite") ||
+			    !strcasecmp(val, "infinity") ||
+			    !strcasecmp(val, "inf") ||
+			    !strcasecmp(val, "unlimited") ||
+			    !strcasecmp(val, "none") ||
+			    !strcasecmp(val, "nolimit"))
+			    sizelimit = 0;
+			else
+			    sizelimit = atoi(val);
+			break;
 		      case 'o':
 			logfile = val;
 			break;
@@ -5110,14 +7024,118 @@ int main(int argc, char **argv)
 			    if (!sscanf(val, "%x", &clientid) &&
 				!sscanf(val, "0x%x", &clientid) &&
 				!sscanf(val, "0X%x", &clientid)) {
-				fprintf(stderr, "xtrace: option '-p' expects"
+				fprintf(stderr, "xtruss: option '-p' expects"
 					" either a hex resource id or '-'\n");
+				return 1;
+			    }
+			}
+			break;
+		      case 'e':
+			{
+			    char *p;
+			    struct set *set;
+
+			    /*
+			     * Mimic the strace -e format: a list of
+			     * comma-separated strings, optionally
+			     * preceded by ! to indicate that those
+			     * are things _not_ to print, optionally
+			     * preceded further by a string followed
+			     * by '=' indicating that we're setting
+			     * something other than the default set
+			     * of requests to be logged.
+			     *
+			     * (Currently the only configurable set
+			     * _is_ that of requests to be logged,
+			     * but I put the machinery in place now
+			     * for there to be others since I
+			     * anticipate that there might very well
+			     * be.)
+			     */
+
+			    p = strchr(val, '=');
+			    if (p) {
+				if (!strzlencmp("requests", val, p-val) ||
+				    !strzlencmp("request", val, p-val) ||
+				    !strzlencmp("reqs", val, p-val) ||
+				    !strzlencmp("req", val, p-val))
+				    set = &requests_to_log;
+				else if (!strzlencmp("events", val, p-val) ||
+					 !strzlencmp("event", val, p-val))
+				    set = &events_to_log;
+				else {
+				    fprintf(stderr, "xtruss: unknown keyword"
+					    " for '-e': '%.*s'\n", p-val, val);
+				    return 1;
+				}
+				p++;   /* skip '=' */
+			    } else {
+				/* In the absence of a foo= prefix, default
+				 * is to configure the set of X requests which
+				 * are printed or not printed. */
+				set = &requests_to_log;
+				p = val;
+			    }
+
+			    if (*p == '!') {
+				set->include = FALSE;
+				p++;
+			    } else {
+				set->include = TRUE;
+			    }
+
+			    /* Empty the previous contents of the set if any */
+			    while (1) {
+				char *q = delpos234(set->strings, 0);
+				if (!q)
+				    break;
+				sfree(q);
+			    }
+
+			    while (p && *p) {
+				char *q = strchr(p, ',');
+				if (q)
+				    *q++ = '\0';
+
+				if (!strcmp(p, "none")) {
+				    /* just a placeholder */
+				} else if (!strcmp(p, "all")) {
+				    /*
+				     * Special case: everything is
+				     * included in this set, so we
+				     * have to flip the 'include'
+				     * parameter and empty the tree.
+				     */
+				    while (1) {
+					char *r = delpos234(set->strings, 0);
+					if (!r)
+					    break;
+					sfree(r);
+				    }
+				    set->include = !set->include;
+				    /* And nothing else will change this. */
+				    break;
+				} else {
+				    /* Just add to the set normally */
+				    add234(set->strings, dupstr(p));
+				}
+
+				p = q;
 			    }
 			}
 			break;
 		    }
 		    break;
 		    /* now options not requiring an argument */
+		  case 'I':
+		    print_server_startup = TRUE;
+		    break;
+		  case 'R':
+		    raw_hex_dump = TRUE;
+		    break;
+		  case 'C':
+		    print_client_ids = TRUE;
+		    break;
 		}
 	    }
 	    /* No command-line options yet supported */
@@ -5134,7 +7152,8 @@ int main(int argc, char **argv)
     }
 
     if (!xrecord && !cmd) {
-	fprintf(stderr, "xtrace: must specify a command to run\n");
+	fprintf(stderr, "xtruss: must specify a command to run, or -p\n");
+	usage(stderr);
 	return 1;
     }
 
@@ -5151,7 +7170,7 @@ int main(int argc, char **argv)
     if (logfile) {
 	xlogfp = fopen(logfile, "w");
 	if (!xlogfp) {
-	    fprintf(stderr, "xtrace: open(\"%s\"): %s\n", logfile,
+	    fprintf(stderr, "xtruss: open(\"%s\"): %s\n", logfile,
 		    strerror(errno));
 	    return 1;
 	}
@@ -5166,7 +7185,8 @@ int main(int argc, char **argv)
 	displaynum = start_xproxy(&cfg, 10);
 
 	/* FIXME: configurable directory? At the very least, look at TMPDIR etc */
-	authfilename = dupstr("/tmp/xtrace-authority-XXXXXX");
+	authfilename = dupstr("/tmp/xtruss-authority-XXXXXX");
+
 	{
 	    int authfd, oldumask;
 	    FILE *authfp;
@@ -5178,6 +7198,39 @@ int main(int argc, char **argv)
 	    oldumask = umask(077);
 	    authfd = mkstemp(authfilename);
 	    umask(oldumask);
+
+	    /*
+	     * Spawn a subprocess which will try to reliably delete our
+	     * auth file when we terminate, in case we die by ^C.
+	     */
+	    {
+		int cleanup_pipe[2];
+		pid_t pid;
+
+		/* Don't worry if pipe or fork fails; it's not _that_ critical. */
+		if (!pipe(cleanup_pipe)) {
+		    if ((pid = fork()) == 0) {
+			int buf[1024];
+			/*
+			 * Our parent process holds the writing end of
+			 * this pipe, and writes nothing to it. Hence,
+			 * we expect read() to return EOF as soon as
+			 * that process terminates.
+			 */
+			setpgid(0, 0);
+			close(cleanup_pipe[1]);
+			while (read(cleanup_pipe[0], buf, sizeof(buf)) > 0);
+			unlink(authfilename);
+			exit(0);
+		    } else if (pid < 0) {
+			close(cleanup_pipe[0]);
+			close(cleanup_pipe[1]);
+		    } else {
+			close(cleanup_pipe[0]);
+			cloexec(cleanup_pipe[1]);
+		    }
+		}
+	    }
 
 	    authfp = fdopen(authfd, "wb");
 
