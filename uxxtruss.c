@@ -25,14 +25,7 @@
  */
 
 /*
- * Definitely TODO:
- *
- *  - Pre-publication polishing:
- *     * figure out how to turn this sprawling directory full of
- * 	 unused pieces of PuTTY into something that can convincingly
- * 	 pretend to be a tarball of just xtruss...
- *
- * Possibly TODO:
+ * Possible future work:
  *
  *  - Arrange to let the network abstraction keep the peer address
  *    of incoming connections, so that we can provide
@@ -138,6 +131,20 @@
  *    appropriate DISPLAY and XAUTHORITY environment variables to
  *    standard output in a form easily pasted into another shell
  *    prompt, and then sit there waiting for connections.
+ *
+ *  - Clean the source code up:
+ *     + Separate the potentially cross-platform X protocol decoder
+ * 	 from the Unix-specific front end implementation
+ *     + Split up the giant switch-statement functions into smaller
+ * 	 pieces: compilers already struggle a bit with them on high
+ * 	 optimisation levels, and they'll only get bigger if more X
+ * 	 extensions become supported
+ *     + Think about how to manage the source modules cribbed from
+ * 	 PuTTY: want to strike a good balance between keeping them
+ * 	 PuTTYlike enough to be able to feed useful changes back,
+ * 	 and keeping them small and xtruss-specific enough for the
+ * 	 tarball not to look utterly stupid or include unnecessary
+ * 	 gunk.
  */
 
 #include <stdio.h>
@@ -7054,7 +7061,8 @@ int main(int argc, char **argv)
 				    set = &events_to_log;
 				else {
 				    fprintf(stderr, "xtruss: unknown keyword"
-					    " for '-e': '%.*s'\n", p-val, val);
+					    " for '-e': '%.*s'\n",
+					    (int)p-val, val);
 				    return 1;
 				}
 				p++;   /* skip '=' */
