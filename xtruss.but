@@ -193,9 +193,6 @@ Many commonly used X protocol extensions are not currently decoded.
 
 A lot of this program has been only minimally tested.
 
-This man page doesn't really go into enough detail about how the
-proxying works.
-
 \U LICENCE
 
 \cw{xtruss} is free software, distributed under the MIT/X11 licence.
