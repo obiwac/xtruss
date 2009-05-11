@@ -6813,7 +6813,7 @@ char *platform_get_x_display(void) {
     char *disp = getenv("DISPLAY");
     if (!disp || !*disp) {
 	fprintf(stderr, "xtruss: no X display specified (use -display or"
-		" set DISPLAY\n");
+		" set DISPLAY)\n");
 	exit(1);
     }
     return dupstr(disp);
