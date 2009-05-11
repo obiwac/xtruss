@@ -25,6 +25,12 @@ binaries: $(BINARIES)
 xtruss: $(XTRUSS_OBJS)
 	gcc $(LFLAGS) -o xtruss $(XTRUSS_OBJS)
 
+configure: configure.ac
+	aclocal
+	autoconf
+	@# autoheader # reinstate if we need a config.h
+	automake -a --foreign
+
 INTERNALFLAGS=#
 
 $(ALLOBJS): %.o: %.c
@@ -43,7 +49,7 @@ clean:
 spotless: clean
 	rm -f config.h config.h.in config.log config.status configure
 	rm -f depcomp install-sh missing stamp-h1
-	rm -f Makefile.in aclocal.m4
-	rm -rf autom4te.cache .deps
+	rm -f Makefile.in aclocal.m4 build.log
+	rm -rf autom4te.cache .deps build.out
 
 -include $(ALLDEPS)

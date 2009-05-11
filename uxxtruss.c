@@ -6888,22 +6888,11 @@ void licence(void) {
 }
 
 void version(void) {
-#define SVN_REV "$Revision$"
-    char rev[sizeof(SVN_REV)];
-    char *p, *q;
-
-    strcpy(rev, SVN_REV);
-
-    for (p = rev; *p && *p != ':'; p++);
-    if (*p) {
-        p++;
-        while (*p && isspace(*p)) p++;
-        for (q = p; *q && *q != '$'; q++);
-        if (*q) *q = '\0';
-        printf("xtruss revision %s\n", p);
-    } else {
-        printf("xtruss: unknown version\n");
-    }
+#ifdef PACKAGE_VERSION
+    printf("xtruss, revision %s\n", PACKAGE_VERSION);
+#else
+    printf("xtruss: version number unavailable when not built via automake\n");
+#endif
 }
 
 int main(int argc, char **argv)

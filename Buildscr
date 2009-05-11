@@ -1,0 +1,25 @@
+# -*- sh -*-
+#
+# bob script to build the xtruss tarball.
+
+module xtruss
+
+# Build the man page.
+in xtruss do make doc
+
+in xtruss do sed '/AC_INIT/s/6.66/r$(revision)/' configure.ac > tmp.ac
+in xtruss do mv tmp.ac configure.ac
+in xtruss do aclocal
+in xtruss do autoconf
+# in xtruss do autoheader   # reinstate if we need a config.h
+in xtruss do automake -a --foreign
+in xtruss do rm -rf autom4te.cache
+
+in . do cp -R xtruss xtruss-r$(revision)
+in . do rm xtruss-r$(revision)/GNUmakefile
+in . do tar chzvf xtruss-r$(revision).tar.gz xtruss-r$(revision)
+
+in xtruss do halibut --html=manpage.html xtruss.but
+
+deliver xtruss-r$(revision).tar.gz $@
+deliver xtruss/manpage.html $@
