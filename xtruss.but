@@ -16,6 +16,8 @@
 \e bbbbbb   iiiiiii   bb iiiiiiiiiiiii
 \c xtruss [ options ] -p -
 \e bbbbbb   iiiiiii   bb b
+\c xtruss [ options ] -P
+\e bbbbbb   iiiiiii   bb
 
 \U DESCRIPTION
 
@@ -24,13 +26,17 @@ the X server and one or more X client programs. In this it is
 similar to \cw{xmon}(1), but intended to combine \cw{xmon}'s basic
 functionality with an interface much more similar to \cw{strace}(1).
 
-Unlike \cw{xmon}, you don't have to start the trace utility in one
-terminal and manually attach processes to it from another. The
-principal mode of use is just to type \cw{xtruss} followed by the
-command line of your X program; \cw{xtruss} will take care itself of
-setting up an X proxy and adjusting the new program's environment to
-point at it, and (also unlike \cw{xmon}) it will also take care of
-setting up X authorisation automatically.
+Like \cw{xmon}, \cw{xtruss} in its default mode works by setting up
+a proxy X server, waiting for connections to that, and forwarding
+them on to the real X server. However, unlike \cw{xmon}, you don't
+have to deal with any of that by hand: there's no need to start the
+trace utility in one terminal and manually attach processes to it
+from another, unless you really want to (in which case the \cw{-P}
+option will do that). The principal mode of use is just to type
+\cw{xtruss} followed by the command line of your X program;
+\cw{xtruss} will automatically take care of adjusting the new
+program's environment to point at its proxy server, and (also unlike
+\cw{xmon}) it will also take care of X authorisation automatically.
 
 As an alternative mode of use, you can also attach \cw{xtruss} to an
 already-running X application, if you didn't realise you were going
@@ -88,9 +94,8 @@ like this:
 
 \U OPTIONS
 
-If you want to attach \cw{xtruss} to an already-running X client,
-then instead of specifying a command to run you should give the
-following option:
+These options change the mode of operation of \cw{xtruss} away from
+the default of acting as a wrapper on a single command:
 
 \dt \cw{-p} \e{resource-ID}
 
@@ -106,7 +111,19 @@ select a window by clicking with the mouse (similarly to
 \cw{xkill}(1), \cw{xwininfo}(1) and \cw{xprop}(1)) and will trace
 the client that owns the window you select.
 
-The following options apply to both modes of operation:
+\dt \cw{-P}
+
+\dd Set up a logging X proxy as in the normal mode, but instead of
+spawning a subprocess to connect to that proxy, just wait for
+connections. This turns \cw{xtruss} into a tool more similar to
+\cw{xmon}: you start it in one terminal window, and then from
+another terminal window you can configure selected processes to
+connect to the proxy server and be logged. \cw{xtruss} will print on
+standard output the environment variables you need to set up to
+connect other processes to the proxy (in both \cw{sh} and \cw{csh}
+syntax).
+
+The following options apply to all modes of operation:
 
 \dt \cw{-s} \e{length}
 

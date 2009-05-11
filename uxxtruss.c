@@ -6834,6 +6834,7 @@ const char usagemsg[] =
 "  usage: xtruss [options] command [command arguments]       trace a new program\n"
 "     or: xtruss [options] -p <resource id>     trace an X client by resource id\n"
 "     or: xtruss [options] -p -         trace an X client selected interactively\n"
+"     or: xtruss [options] -P           just run a logging proxy server\n"
 "options: -s <length>             set approximate limit on line length\n"
 "         -o <file>               send log output to a file (default=stderr)\n"
 "         -e [<class>=][!]<item>[,<item>...]  filter the packets output, where:\n"
