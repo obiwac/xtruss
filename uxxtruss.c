@@ -7062,7 +7062,7 @@ int main(int argc, char **argv)
 				else {
 				    fprintf(stderr, "xtruss: unknown keyword"
 					    " for '-e': '%.*s'\n",
-					    (int)p-val, val);
+					    (int)(p-val), val);
 				    return 1;
 				}
 				p++;   /* skip '=' */
