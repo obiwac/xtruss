@@ -126,12 +126,6 @@
  *    vast amount of this program that I translated straight out of
  *    the X protocol specs...
  *
- *  - Ability to run as an explicit proxy, as other X tracing
- *    utilities do. Run in this mode, xtruss should print the
- *    appropriate DISPLAY and XAUTHORITY environment variables to
- *    standard output in a form easily pasted into another shell
- *    prompt, and then sit there waiting for connections.
- *
  *  - Clean the source code up:
  *     + Separate the potentially cross-platform X protocol decoder
  * 	 from the Unix-specific front end implementation
@@ -6913,7 +6907,7 @@ int main(int argc, char **argv)
     int displaynum;
     char hostname[1024];
     pid_t pid;
-    int xrecord, selectclient;
+    int xrecord, selectclient, proxy_only;
     unsigned clientid;
     int doing_opts = TRUE;
 
@@ -6921,6 +6915,7 @@ int main(int argc, char **argv)
     fdcount = fdsize = 0;
     xrecord = FALSE;
     selectclient = FALSE;
+    proxy_only = FALSE;
 
     requests_to_log.include = FALSE;
     requests_to_log.strings = newtree234(stringcmp);
@@ -7133,23 +7128,28 @@ int main(int argc, char **argv)
 		  case 'C':
 		    print_client_ids = TRUE;
 		    break;
+		  case 'P':
+		    proxy_only = TRUE;
+		    break;
 		}
 	    }
-	    /* No command-line options yet supported */
 	    /* Configure mindisplaynum */
 	    /* Configure proxy-side auth */
-	    /* -display option, of course */
-	    /* A server mode, in which we print our connection details and don't fork? */
-	    /* Logging config: filter requests, filter events, tune display of sequence numbers and connection ids */
-	    /* Log output file */
 	} else {
 	    cmd = argv;
 	    break;
 	}
     }
 
-    if (!xrecord && !cmd) {
+    if (!xrecord && !cmd && !proxy_only) {
 	fprintf(stderr, "xtruss: must specify a command to run, or -p\n");
+	usage(stderr);
+	return 1;
+    }
+
+    if ((xrecord && cmd) || (xrecord && proxy_only) || (cmd && proxy_only)) {
+	fprintf(stderr, "xtruss: must specify exactly one of -p, -P and"
+		" a command\n");
 	usage(stderr);
 	return 1;
     }
@@ -7259,19 +7259,26 @@ int main(int argc, char **argv)
 	    fclose(authfp);
 	}
 
-	pid = fork();
-	if (pid < 0) {
-	    perror("fork");
-	    unlink(authfilename);
-	    exit(1);
-	} else if (pid == 0) {
-	    putenv(dupprintf("DISPLAY=%s:%d", hostname, displaynum));
-	    putenv(dupprintf("XAUTHORITY=%s", authfilename));
-	    execvp(cmd[0], cmd);
-	    perror("exec");
-	    exit(127);
-	} else
-	    childpid = pid;
+	if (proxy_only) {
+	    printf("For sh: export DISPLAY=%s:%d XAUTHORITY=%s\n",
+		   hostname, displaynum, authfilename);
+	    printf("For csh: setenv DISPLAY=%s:%d; setenv XAUTHORITY=%s\n",
+		   hostname, displaynum, authfilename);
+	} else {
+	    pid = fork();
+	    if (pid < 0) {
+		perror("fork");
+		unlink(authfilename);
+		exit(1);
+	    } else if (pid == 0) {
+		putenv(dupprintf("DISPLAY=%s:%d", hostname, displaynum));
+		putenv(dupprintf("XAUTHORITY=%s", authfilename));
+		execvp(cmd[0], cmd);
+		perror("exec");
+		exit(127);
+	    } else
+		childpid = pid;
+	}
     }
 
     now = GETTICKCOUNT();
