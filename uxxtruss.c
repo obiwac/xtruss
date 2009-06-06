@@ -1741,6 +1741,30 @@ int xlog_image_data(struct xlog *xl, const char *paramname,
     }
 }
 
+void xlog_use_welcome_message(struct xlog *xl,
+			      const unsigned char *data, int len)
+{
+    xl->bitmap_scanline_unit = FETCH8(data, 32);
+    xl->bitmap_scanline_pad = FETCH8(data, 33);
+    xl->image_byte_order = FETCH8(data, 30);
+    xl->npixmapformats = FETCH8(data, 29);
+    xl->pixmapformats = snewn(xl->npixmapformats, struct pixmapformat);
+    {
+	int i, pos = 40 + FETCH16(data, 24);
+	pos = (pos + 3) &~ 3;
+
+	for (i = 0; i < xl->npixmapformats; i++) {
+	    xl->pixmapformats[i].depth =
+		FETCH8(data, pos);
+	    xl->pixmapformats[i].bits_per_pixel =
+		FETCH8(data, pos+1);
+	    xl->pixmapformats[i].scanline_pad =
+		FETCH8(data, pos+2);
+	    pos += 8;
+	}
+    }
+}
+
 void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 {
     const unsigned char *data = (const unsigned char *)vdata;
@@ -5939,32 +5963,7 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 	     * to decode PutImage and GetImage requests during the
 	     * protocol.
 	     */
-	    {
-		/* variables on which the FETCH macros depend */
-		const unsigned char *data = xl->s2cbuf;
-		int len = xl->s2clen;
-
-		xl->bitmap_scanline_unit = FETCH8(data, 32);
-		xl->bitmap_scanline_pad = FETCH8(data, 33);
-		xl->image_byte_order = FETCH8(data, 30);
-		xl->npixmapformats = FETCH8(data, 29);
-		xl->pixmapformats = snewn(xl->npixmapformats,
-					  struct pixmapformat);
-		{
-		    int pos = 40 + FETCH16(data, 24);
-		    pos = (pos + 3) &~ 3;
-
-		    for (i = 0; i < xl->npixmapformats; i++) {
-			xl->pixmapformats[i].depth =
-			    FETCH8(data, pos);
-			xl->pixmapformats[i].bits_per_pixel =
-			    FETCH8(data, pos+1);
-			xl->pixmapformats[i].scanline_pad =
-			    FETCH8(data, pos+2);
-			pos += 8;
-		    }
-		}
-	    }
+	    xlog_use_welcome_message(xl, xl->s2cbuf, xl->s2clen);
 	    break;
 	}
     }
@@ -6305,6 +6304,11 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	rootoffset += 8 * c->xrecordbuf[29];
 	c->rootwin = GET_32BIT_MSB_FIRST(c->xrecordbuf + rootoffset);
     }
+    /*
+     * Also, extract the pixmap formats, which we'll need if the
+     * process we're 'tracing' sends an image in either direction.
+     */
+    xlog_use_welcome_message(c->xl, c->xrecordbuf, c->xrecordlen);
 
     /*
      * Simple means of allocating a small number of resource ids in
