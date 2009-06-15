@@ -1,6 +1,8 @@
 #ifndef PUTTY_PUTTY_H
 #define PUTTY_PUTTY_H
 
+#define NO_GSSAPI
+
 #include <stddef.h>		       /* for wchar_t */
 
 /*
