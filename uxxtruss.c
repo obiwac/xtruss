@@ -7184,6 +7184,8 @@ int main(int argc, char **argv)
     if (xrecord) {
 	start_xrecord(&cfg, selectclient, clientid);
     } else {
+	char *canonicalname;
+
 	displaynum = start_xproxy(&cfg, 10);
 
 	/* FIXME: configurable directory? At the very least, look at TMPDIR etc */
@@ -7193,7 +7195,6 @@ int main(int argc, char **argv)
 	    int authfd, oldumask;
 	    FILE *authfp;
 	    SockAddr addr;
-	    char *canonicalname;
 	    char addrbuf[4];
 	    char dispnumstr[64];
 
@@ -7240,6 +7241,10 @@ int main(int argc, char **argv)
 			       &cfg, ADDRTYPE_IPV4);
 	    sk_addrcopy(addr, addrbuf);
 
+	    /*
+	     * Write an X authority record describing the IP address.
+	     */
+
 	    /* Big-endian 2-byte number: zero, meaning IPv4 */
 	    fputc(0, authfp);
 	    fputc(0, authfp);
@@ -7261,14 +7266,46 @@ int main(int argc, char **argv)
 	    fputc(x11disp->remoteauthdatalen & 0xFF, authfp);
 	    fwrite(x11disp->remoteauthdata, 1, x11disp->remoteauthdatalen, authfp);
 
+	    /*
+	     * Write a second record as if there were a Unix-domain
+	     * display socket. There isn't (we can't set one up
+	     * without root privilege), but if the IP address of the
+	     * local machine resolved as 127.0.0.1 (indicating a
+	     * badly set up system, but nonetheless we don't want
+	     * xtruss to fail on such a system if it doesn't have
+	     * to) then X clients will automatically look for this
+	     * record instead.
+	     */
+
+	    /* Big-endian 2-byte number: 256, meaning Unix-domain */
+	    fputc(1, authfp);
+	    fputc(0, authfp);
+	    /* String which is the hostname */
+	    fputc(0xFF & (strlen(hostname) >> 8), authfp);
+	    fputc(0xFF & (strlen(hostname)     ), authfp);
+	    fputs(hostname, authfp);
+	    /* String form of the display number */
+	    sprintf(dispnumstr, "%d", displaynum);
+	    fputc(strlen(dispnumstr) >> 8, authfp);
+	    fputc(strlen(dispnumstr) & 0xFF, authfp);
+	    fputs(dispnumstr, authfp);
+	    /* String giving the auth type */
+	    fputc(strlen(x11disp->remoteauthprotoname) >> 8, authfp);
+	    fputc(strlen(x11disp->remoteauthprotoname) & 0xFF, authfp);
+	    fputs(x11disp->remoteauthprotoname, authfp);
+	    /* String giving the auth data itself */
+	    fputc(x11disp->remoteauthdatalen >> 8, authfp);
+	    fputc(x11disp->remoteauthdatalen & 0xFF, authfp);
+	    fwrite(x11disp->remoteauthdata, 1, x11disp->remoteauthdatalen, authfp);
+
 	    fclose(authfp);
 	}
 
 	if (proxy_only) {
 	    printf("For sh: export DISPLAY=%s:%d XAUTHORITY=%s\n",
-		   hostname, displaynum, authfilename);
+		   canonicalname, displaynum, authfilename);
 	    printf("For csh: setenv DISPLAY=%s:%d; setenv XAUTHORITY=%s\n",
-		   hostname, displaynum, authfilename);
+		   canonicalname, displaynum, authfilename);
 	} else {
 	    pid = fork();
 	    if (pid < 0) {
@@ -7276,7 +7313,7 @@ int main(int argc, char **argv)
 		unlink(authfilename);
 		exit(1);
 	    } else if (pid == 0) {
-		putenv(dupprintf("DISPLAY=%s:%d", hostname, displaynum));
+		putenv(dupprintf("DISPLAY=%s:%d", canonicalname, displaynum));
 		putenv(dupprintf("XAUTHORITY=%s", authfilename));
 		execvp(cmd[0], cmd);
 		perror("exec");
