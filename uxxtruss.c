@@ -2028,9 +2028,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	break;
       case 16:
 	xlog_request_name(xl, req, "InternAtom", TRUE);
-	xlog_param(xl, "name", STRING,
-		   FETCH16(data, 4),
-		   STRING(data, 8, FETCH16(data, 4)));
+        {
+            int stringlen = FETCH16(data, 4);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 8, stringlen));
+        }
 	xlog_param(xl, "only-if-exists", BOOLEAN, FETCH8(data, 1));
 	req->replies = 1;
 	break;
@@ -2048,23 +2050,26 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, 1),
 		   "Replace", 0, "Prepend", 1, "Append", 2,
 		   (char *)NULL);
-	switch (FETCH8(data, 16)) {
-	  case 8:
-	    xlog_param(xl, "data", STRING, FETCH32(data, 20),
-		       STRING(data, 24, FETCH32(data, 20)));
-	    break;
-	  case 16:
-	    xlog_param(xl, "data", HEXSTRING2, FETCH32(data, 20),
-		       STRING(data, 24, 2*FETCH32(data, 20)));
-	    break;
-	  case 32:
-	    xlog_param(xl, "data", HEXSTRING4, FETCH32(data, 20),
-		       STRING(data, 24, 4*FETCH32(data, 20)));
-	    break;
-	  default:
-	    xlog_printf(xl, "<unknown format of data>");
-	    break;
-	}
+        {
+            int stringlen = FETCH32(data, 20);
+            switch (FETCH8(data, 16)) {
+              case 8:
+                xlog_param(xl, "data", STRING, stringlen,
+                           STRING(data, 24, stringlen));
+                break;
+              case 16:
+                xlog_param(xl, "data", HEXSTRING2, stringlen,
+                           STRING(data, 24, 2*stringlen));
+                break;
+              case 32:
+                xlog_param(xl, "data", HEXSTRING4, stringlen,
+                           STRING(data, 24, 4*stringlen));
+                break;
+              default:
+                xlog_printf(xl, "<unknown format of data>");
+                break;
+            }
+        }
 	break;
       case 19:
 	xlog_request_name(xl, req, "DeleteProperty", TRUE);
@@ -2309,9 +2314,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
       case 45:
 	xlog_request_name(xl, req, "OpenFont", TRUE);
 	xlog_param(xl, "fid", FONT, FETCH32(data, 4));
-	xlog_param(xl, "name", STRING,
-		   FETCH16(data, 8),
-		   STRING(data, 12, FETCH16(data, 8)));
+        {
+            int stringlen = FETCH16(data, 8);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 12, stringlen));
+        }
 	break;
       case 46:
 	xlog_request_name(xl, req, "CloseFont", TRUE);
@@ -2339,17 +2346,21 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	break;
       case 49:
 	xlog_request_name(xl, req, "ListFonts", TRUE);
-	xlog_param(xl, "pattern", STRING,
-		   FETCH16(data, 6),
-		   STRING(data, 8, FETCH16(data, 6)));
+        {
+            int stringlen = FETCH16(data, 6);
+            xlog_param(xl, "pattern", STRING, stringlen,
+                       STRING(data, 8, stringlen));
+        }
 	xlog_param(xl, "max-names", DECU, FETCH16(data, 4));
 	req->replies = 1;
 	break;
       case 50:
 	xlog_request_name(xl, req, "ListFontsWithInfo", TRUE);
-	xlog_param(xl, "pattern", STRING,
-		   FETCH16(data, 6),
-		   STRING(data, 8, FETCH16(data, 6)));
+        {
+            int stringlen = FETCH16(data, 6);
+            xlog_param(xl, "pattern", STRING, stringlen,
+                       STRING(data, 8, stringlen));
+        }
 	xlog_param(xl, "max-names", DECU, FETCH16(data, 4));
 	req->replies = 2;		   /* this request expects multiple replies */
 	break;
@@ -2835,9 +2846,15 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "format", ENUM | SPECVAL,
 		   FETCH8(data, 1), "Bitmap", 0, "XYPixmap", 1,
 		   "ZPixmap", 2, (char *)NULL);
-	xlog_image_data(xl, "image-data", data, len, 24, FETCH8(data, 1),
-			FETCH16(data, 12) + FETCH8(data, 20),
-			FETCH16(data, 14), FETCH8(data, 21));
+        {
+            int format, width, height, depth;
+            format = FETCH8(data, 1);
+            width = FETCH16(data, 12); width += FETCH8(data, 20);
+            height = FETCH16(data, 14);
+            depth = FETCH8(data, 21);
+            xlog_image_data(xl, "image-data", data, len, 24,
+                            format, width, height, depth);
+        }
 	break;
       case 73:
 	xlog_request_name(xl, req, "GetImage", TRUE);
@@ -2990,8 +3007,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 14));
-	xlog_param(xl, "string", STRING, FETCH8(data, 1),
-		   STRING(data, 16, FETCH8(data, 1)));
+        {
+            int stringlen = FETCH8(data, 1);
+            xlog_param(xl, "string", STRING, stringlen,
+                       STRING(data, 16, stringlen));
+        }
 	break;
       case 77:
 	xlog_request_name(xl, req, "ImageText16", TRUE);
@@ -2999,8 +3019,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 8));
 	xlog_param(xl, "x", DEC16, FETCH16(data, 12));
 	xlog_param(xl, "y", DEC16, FETCH16(data, 14));
-	xlog_param(xl, "string", HEXSTRING2B, FETCH8(data, 1),
-		   STRING(data, 16, 2*FETCH8(data, 1)));
+        {
+            int stringlen = FETCH8(data, 1);
+            xlog_param(xl, "string", HEXSTRING2B, stringlen,
+                       STRING(data, 16, 2*stringlen));
+        }
 	break;
       case 78:
 	xlog_request_name(xl, req, "CreateColormap", TRUE);
@@ -3043,8 +3066,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
       case 85:
 	xlog_request_name(xl, req, "AllocNamedColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
-	xlog_param(xl, "name", STRING, FETCH16(data, 8),
-		   STRING(data, 12, FETCH16(data, 8)));
+        {
+            int stringlen = FETCH16(data, 8);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 12, stringlen));
+        }
 	req->replies = 1;
 	break;
       case 86:
@@ -3106,8 +3132,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_request_name(xl, req, "StoreNamedColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
 	xlog_param(xl, "pixel", COLORMAP, FETCH32(data, 8));
-	xlog_param(xl, "name", STRING, FETCH16(data, 12),
-		   STRING(data, 16, FETCH16(data, 12)));
+        {
+            int stringlen = FETCH16(data, 12);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 16, stringlen));
+        }
 	xlog_param(xl, "do-red", BOOLEAN, FETCH8(data, 1) & 1);
 	xlog_param(xl, "do-green", BOOLEAN,
 		   (FETCH8(data, 1) >> 1) & 1);
@@ -3135,8 +3164,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
       case 92:
 	xlog_request_name(xl, req, "LookupColor", TRUE);
 	xlog_param(xl, "cmap", COLORMAP, FETCH32(data, 4));
-	xlog_param(xl, "name", STRING, FETCH16(data, 8),
-		   STRING(data, 12, FETCH16(data, 8)));
+        {
+            int stringlen = FETCH16(data, 8);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 12, stringlen));
+        }
 	req->replies = 1;
 	break;
       case 93:
@@ -3194,9 +3226,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	break;
       case 98:
 	xlog_request_name(xl, req, "QueryExtension", TRUE);
-	xlog_param(xl, "name", STRING,
-		   FETCH16(data, 4),
-		   STRING(data, 8, FETCH16(data, 4)));
+        {
+            int stringlen = FETCH16(data, 4);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 8, stringlen));
+        }
 	if (!xl->overflow)
 	    req->extname = dupprintf("%.*s", READ16(data+4), data+8);
 	{
@@ -3307,9 +3341,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	break;
       case 105:
 	xlog_request_name(xl, req, "ChangePointerControl", TRUE);
-	if (FETCH8(data, 10))
-	    xlog_param(xl, "acceleration", RATIONAL16, FETCH16(data, 4),
+	if (FETCH8(data, 10)) {
+            int numerator = FETCH16(data, 4);
+	    xlog_param(xl, "acceleration", RATIONAL16, numerator,
 		       FETCH16(data, 6));
+        }
 	if (FETCH8(data, 11))
 	    xlog_param(xl, "threshold", DEC16, FETCH16(data, 8));
 	break;
@@ -3339,8 +3375,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	xlog_param(xl, "family", ENUM | SPECVAL, FETCH8(data, 4),
 		   "Internet", 0, "DECnet", 1, "Chaos", 2,
 		   (char *)NULL);
-	xlog_param(xl, "address", HEXSTRING1, FETCH16(data, 6),
-		   STRING(data, 8, FETCH16(data, 6)));
+        {
+            int stringlen = FETCH16(data, 6);
+            xlog_param(xl, "address", HEXSTRING1, stringlen,
+                       STRING(data, 8, stringlen));
+        }
 	break;
       case 110:
 	xlog_request_name(xl, req, "ListHosts", TRUE);
@@ -4031,10 +4070,12 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	    }
 	    for (i = 0; i < n; i++) {
 		int ret;
+                int w, h;
 		sprintf(buf, "glyphimages[%d]", i);
+                w = FETCH16(data, whpos+12*i);
+                h = FETCH16(data, whpos+12*i+2);
 		ret = xlog_image_data(xl, buf, data, len, pos, 2,
-				      FETCH16(data, whpos+12*i),
-				      FETCH16(data, whpos+12*i+2), depth);
+				      w, h, depth);
 		if (ret < 0)
 		    break; /* don't know how to advance to next image */
 		pos += (ret + 3) &~ 3;
@@ -4278,8 +4319,11 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
       case EXT_RENDER | 30:
 	xlog_request_name(xl, req, "RenderSetPictureFilter", TRUE);
 	xlog_param(xl, "picture", PICTURE, FETCH32(data, 4));
-	xlog_param(xl, "name", STRING, FETCH16(data, 8),
-		   STRING(data, 12, FETCH16(data, 8)));
+        {
+            int stringlen = FETCH16(data, 8);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 12, stringlen));
+        }
 	{
 	    int pos = (12 + FETCH16(data, 8) + 3) & ~3;
 	    int i = 0;
@@ -4577,9 +4621,11 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	break;
       case 17:
 	/* GetAtomName */
-	xlog_param(xl, "name", STRING,
-		   FETCH16(data, 8),
-		   STRING(data, 32, FETCH16(data, 8)));
+        {
+            int stringlen = FETCH16(data, 8);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 32, stringlen));
+        }
 	/* FIXME: here we ought to add to our own list of atom ids, having
 	 * recorded enough machine-readable data in req to do so */
 	break;
@@ -4588,20 +4634,22 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "type", ATOM | SPECVAL, FETCH32(data, 8),
 		   "None", 0, (char *)NULL);
 	if (FETCH32(data, 8) != 0) {
+            int stringlen;
 	    xlog_param(xl, "format", DECU, FETCH8(data, 1));
 	    xlog_param(xl, "bytes-after", DECU, FETCH32(data, 12));
+            stringlen = FETCH32(data, 16);
 	    switch (FETCH8(data, 1)) {
 	      case 8:
-		xlog_param(xl, "data", STRING, FETCH32(data, 16),
-			   STRING(data, 32, FETCH32(data, 16)));
+		xlog_param(xl, "data", STRING, stringlen,
+			   STRING(data, 32, stringlen));
 		break;
 	      case 16:
-		xlog_param(xl, "data", HEXSTRING2, FETCH32(data, 16),
-			   STRING(data, 32, 2*FETCH32(data, 16)));
+		xlog_param(xl, "data", HEXSTRING2, stringlen,
+			   STRING(data, 32, 2*stringlen));
 		break;
 	      case 32:
-		xlog_param(xl, "data", HEXSTRING4, FETCH32(data, 16),
-			   STRING(data, 32, 4*FETCH32(data, 16)));
+		xlog_param(xl, "data", HEXSTRING4, stringlen,
+			   STRING(data, 32, 4*stringlen));
 		break;
 	      default:
 		xlog_printf(xl, "<unknown format of data>");
@@ -4790,8 +4838,12 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	    xlog_param(xl, "last-reply", BOOLEAN, 1);
 	    break;
 	}
-	xlog_param(xl, "name", STRING, FETCH8(data, 1),
-		   STRING(data, 64+8*FETCH16(data, 46), FETCH8(data, 1)));
+        {
+            int stringlen = FETCH8(data, 1);
+            int stringoffset = FETCH16(data, 46);
+            xlog_param(xl, "name", STRING, stringlen,
+                       STRING(data, 64+8*stringoffset, stringlen));
+        }
 	xlog_param(xl, "draw-direction", ENUM | SPECVAL, FETCH8(data, 48),
 		   "LeftToRight", 0, "RightToLeft", 1, (char *)NULL);
 	xlog_param(xl, "min-char-or-byte2", DECU, FETCH16(data, 40));
@@ -5078,8 +5130,11 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	break;
       case 106:
 	/* GetPointerControl */
-	xlog_param(xl, "acceleration", RATIONAL16, FETCH16(data, 8),
-		   FETCH16(data, 10));
+        {
+            int numerator = FETCH16(data, 8);
+            xlog_param(xl, "acceleration", RATIONAL16, numerator,
+                       FETCH16(data, 10));
+        }
 	xlog_param(xl, "threshold", DEC16, FETCH16(data, 12));
 	break;
       case 108:
@@ -5102,13 +5157,15 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	    n = FETCH16(data, 8);
 	    for (i = 0; i < n; i++) {
 		char buf[64];
+                int stringlen;
 		sprintf(buf, "hosts[%d]", i);
 		xlog_param(xl, buf, SETBEGIN);
 		xlog_param(xl, "family", ENUM | SPECVAL, FETCH8(data, pos),
 			   "Internet", 0, "DECnet", 1, "Chaos", 2,
 			   (char *)NULL);
-		xlog_param(xl, "address", HEXSTRING1, FETCH16(data, pos+2),
-			   STRING(data, pos+4, FETCH16(data, pos+2)));
+                stringlen = FETCH16(data, pos+2);
+		xlog_param(xl, "address", HEXSTRING1, stringlen,
+			   STRING(data, pos+4, stringlen));
 		xlog_set_end(xl);
 		pos += 4 + ((FETCH16(data, pos+2) + 3) &~ 3);
 		if (i+1 < n && xlog_check_list_length(xl))
@@ -5364,9 +5421,11 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	    n = FETCH32(data, 12);
 	    for (i = 0; i < n; i++) {
 		char buf[64];
+                int stringlen;
 		sprintf(buf, "filters[%d]", i);
-		xlog_param(xl, buf, STRING, FETCH8(data, pos),
-			   STRING(data, pos+1, FETCH8(data, pos)));
+                stringlen = FETCH8(data, pos);
+		xlog_param(xl, buf, STRING, stringlen,
+			   STRING(data, pos+1, stringlen));
 		pos += 1 + FETCH8(data, pos);
 		if (i+1 < n && xlog_check_list_length(xl))
 		    break;
@@ -5842,8 +5901,11 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 			   FETCH8(data, 34));
 		xlog_param(xl, "max-keycode", DECU,
 			   FETCH8(data, 35));
-		xlog_param(xl, "vendor", STRING, FETCH16(data, 24),
-			   STRING(data, 40, FETCH16(data, 24)));
+                {
+                    int stringlen = FETCH16(data, 24);
+                    xlog_param(xl, "vendor", STRING, stringlen,
+                               STRING(data, 40, stringlen));
+                }
 
 		{
 		    int i, n;
