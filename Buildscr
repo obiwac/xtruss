@@ -12,7 +12,7 @@ in xtruss do mv tmp.ac configure.ac
 in xtruss do aclocal
 in xtruss do autoconf
 # in xtruss do autoheader   # reinstate if we need a config.h
-in xtruss do automake -a --foreign
+in xtruss do automake -a
 in xtruss do rm -rf autom4te.cache
 
 in . do cp -R xtruss xtruss-r$(revision)

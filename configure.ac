@@ -3,7 +3,7 @@
 AC_INIT([xtruss], [6.66], [anakin@pobox.com])
 AC_CONFIG_SRCDIR([uxxtruss.c])
 
-AM_INIT_AUTOMAKE
+AM_INIT_AUTOMAKE([foreign])
 
 AC_PROG_CC
 AC_PROG_CC_C99
