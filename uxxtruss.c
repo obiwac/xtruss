@@ -625,10 +625,15 @@ void xlog_request_name(struct xlog *xl, struct request *req, const char *buf,
     xl->reqlogstate = 0;
 }
 
-#define FETCH8(p, n)  ( (n)+1>len ? (xl->overflow=1,0) : READ8((p)+(n)) )
-#define FETCH16(p, n) ( (n)+2>len ? (xl->overflow=1,0) : READ16((p)+(n)) )
-#define FETCH32(p, n) ( (n)+4>len ? (xl->overflow=1,0) : READ32((p)+(n)) )
-#define STRING(p, n, l) ( (n)+(l)>len ? (xl->overflow=1,NULL) : (char *)(p)+(n) )
+void set_overflow(struct xlog *xl)
+{
+    xl->overflow = 1;
+}
+
+#define FETCH8(p, n)  ( (n)+1>len ? (set_overflow(xl),0) : READ8((p)+(n)) )
+#define FETCH16(p, n) ( (n)+2>len ? (set_overflow(xl),0) : READ16((p)+(n)) )
+#define FETCH32(p, n) ( (n)+4>len ? (set_overflow(xl),0) : READ32((p)+(n)) )
+#define STRING(p, n, l) ( (n)+(l)>len ? (set_overflow(xl),NULL) : (char *)(p)+(n) )
 
 /*
  * Enumeration of data type codes. These don't exactly match the X
