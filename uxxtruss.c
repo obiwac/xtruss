@@ -74,13 +74,10 @@
  *    newlines and appropriate indentation?
  *
  *  - Tracking of server state to usefully annotate the connection.
- *     * We could certainly track currently known atoms, starting
- * 	 with the standard predefined set and adding them when we
- * 	 see the replies to InternAtom and GetAtomName.
- * 	  + Another more radical approach here would be to establish
- * 	    our own connection to the server and use it to _look up_
- * 	    any atom id we don't already know before we print the
- * 	    request/response in which it appears.
+ *     * A more radical approach to tracking atoms would be to establish
+ * 	 our own connection to the server and use it to _look up_
+ * 	 any atom id we don't already know before we print the
+ * 	 request/response in which it appears.
  * 	  + In order to be able to do those lookups synchronously
  * 	    within do_request and friends, this would require some
  * 	    tinkering with the event loop code, or alternatively
@@ -276,6 +273,8 @@ struct request {
      * when the reply comes in.
      */
     int first_keycode, keycode_count;  /* for GetKeyboardMapping */
+    char *atomname; /* for InternAtom */
+    unsigned long atomnum; /* for GetAtomName */
 
     /*
      * Machine-readable representation of the extension seen in a
@@ -344,6 +343,67 @@ static int resdepthfind(void *av, void *bv)
 	return 0;
 }
 
+struct atom {
+    unsigned long atomval;
+    char *atomname;
+};
+static int atomcmp(void *av, void *bv)
+{
+    const struct atom *a = (const struct atom *)av;
+    const struct atom *b = (const struct atom *)bv;
+    if (a->atomval < b->atomval)
+	return -1;
+    else if (a->atomval > b->atomval)
+	return +1;
+    else
+	return 0;
+}
+static int atomfind(void *av, void *bv)
+{
+    const unsigned long *a = (const unsigned long *)av;
+    const struct atom *b = (const struct atom *)bv;
+    if (*a < b->atomval)
+	return -1;
+    else if (*a > b->atomval)
+	return +1;
+    else
+	return 0;
+}
+static void internatom(tree234 *atoms, char *name, unsigned long val)
+{
+    struct atom *a = snew(struct atom);
+    a->atomval = val;
+    a->atomname = name;
+    if (add234(atoms, a) != a) {
+	sfree(a->atomname);
+	sfree(a);
+    }
+}
+
+static char const * stdatoms[] = {
+    "PRIMARY", "SECONDARY", "ARC", "ATOM", "BITMAP", "CARDINAL", "COLORMAP",
+    "CURSOR", "CUT_BUFFER0", "CUT_BUFFER1", "CUT_BUFFER2", "CUT_BUFFER3",
+    "CUT_BUFFER4", "CUT_BUFFER5", "CUT_BUFFER6", "CUT_BUFFER7", "DRAWABLE",
+    "FONT", "INTEGER", "PIXMAP", "POINT", "RECTANGLE", "RESOURCE_MANAGER",
+    "RGB_COLOR_MAP", "RGB_BEST_MAP", "RGB_BLUE_MAP", "RGB_DEFAULT_MAP",
+    "RGB_GRAY_MAP", "RGB_GREEN_MAP", "RGB_RED_MAP", "STRING", "VISUALID",
+    "WINDOW", "WM_COMMAND", "WM_HINTS", "WM_CLIENT_MACHINE", "WM_ICON_NAME",
+    "WM_ICON_SIZE", "WM_NAME", "WM_NORMAL_HINTS", "WM_SIZE_HINTS",
+    "WM_ZOOM_HINTS", "MIN_SPACE", "NORM_SPACE", "MAX_SPACE", "END_SPACE",
+    "SUPERSCRIPT_X", "SUPERSCRIPT_Y", "SUBSCRIPT_X", "SUBSCRIPT_Y",
+    "UNDERLINE_POSITION", "UNDERLINE_THICKNESS", "STRIKEOUT_ASCENT",
+    "STRIKEOUT_DESCENT", "ITALIC_ANGLE", "X_HEIGHT", "QUAD_WIDTH", "WEIGHT",
+    "POINT_SIZE", "RESOLUTION", "COPYRIGHT", "NOTICE", "FONT_NAME",
+    "FAMILY_NAME", "FULL_NAME", "CAP_HEIGHT", "WM_CLASS", "WM_TRANSIENT_FOR"
+};
+static void internstdatoms(tree234 *atoms)
+{
+    int i;
+    for (i = 0; i < lenof(stdatoms); i++)
+	/* Standard atoms are numbered contiguously from 1. */
+	internatom(atoms, dupstr(stdatoms[i]), i+1);
+}
+
 struct xlog {
     int c2sstate, s2cstate;
     char *textbuf;
@@ -379,6 +439,7 @@ struct xlog {
      * to every GLYPHSET created.
      */
     tree234 *resdepths;
+    tree234 *atoms;
 };
 
 struct xlog *xlog_new(int type)
@@ -408,6 +469,8 @@ struct xlog *xlog_new(int type)
 	xl->exterrors[i] = NULL, xl->extidevents[i] = 0;
     xl->pixmapformats = NULL;
     xl->resdepths = newtree234(resdepthcmp);
+    xl->atoms = newtree234(atomcmp);
+    internstdatoms(xl->atoms);
     return xl;
 }
 
@@ -415,6 +478,7 @@ void free_request(struct request *req)
 {
     sfree(req->text);
     sfree(req->extname);
+    sfree(req->atomname);
     sfree(req);
 }
 
@@ -422,9 +486,15 @@ void xlog_free(struct xlog *xl)
 {
     int i;
     struct resdepth *gsd;
+    struct atom *a;
     while ((gsd = delpos234(xl->resdepths, 0)) != NULL)
 	sfree(gsd);
     freetree234(xl->resdepths);
+    while ((a = delpos234(xl->atoms, 0)) != NULL) {
+	sfree((void *)a->atomname);
+	sfree(a);
+    }
+    freetree234(xl->atoms);
     while (xl->rhead) {
 	struct request *nexthead = xl->rhead->next;
 	free_request(xl->rhead);
@@ -1068,17 +1138,15 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 		writemaskv(xl, ival, ap);
 		break;
 	      case ATOM:
-		/*
-		 * FIXME: I think we should automatically translate
-		 * atom names, at least by default. This may involve
-		 * making our _own_ X connection to the real X
-		 * server, so that we can send GetAtomName requests
-		 * for any we don't already know. Alternatively, we
-		 * might not need to bother, if we can just keep
-		 * track of all the requests this connection is
-		 * sending.
-		 */
-		xlog_printf(xl, "a#%d", ival);
+	        {
+		  const struct atom *a = find234(xl->atoms, &ival, atomfind);
+		  if (a != NULL) {
+		      xlog_text(xl, "a\"");
+		      print_c_string(xl, a->atomname, strlen(a->atomname));
+		      xlog_text(xl, "\"");
+		  } else
+		      xlog_printf(xl, "a#%d", ival);
+		}
 		break;
 	    }
 	    break;
@@ -1786,6 +1854,9 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
     req->extid = 0;
     req->printed = TRUE;
 
+    req->atomname = NULL;
+    req->atomnum = 0;
+
     /*
      * Translate requests belonging to known extensions so we can
      * switch on them.
@@ -2032,16 +2103,26 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
       case 16:
-	xlog_request_name(xl, req, "InternAtom", TRUE);
-	xlog_param(xl, "name", STRING,
-		   FETCH16(data, 4),
-		   STRING(data, 8, FETCH16(data, 4)));
-	xlog_param(xl, "only-if-exists", BOOLEAN, FETCH8(data, 1));
-	req->replies = 1;
+        {
+	  unsigned long atomlen;
+	  char *atomstr;
+	  xlog_request_name(xl, req, "InternAtom", TRUE);
+	  atomlen = FETCH16(data, 4);
+	  atomstr = STRING(data, 8, atomlen);
+	  if (!xl->overflow) {
+	      req->atomname = snewn(atomlen + 1, char);
+	      memcpy(req->atomname, atomstr, atomlen);
+	      req->atomname[atomlen] = '\0';
+	  }
+	  xlog_param(xl, "name", STRING, atomlen, atomstr);
+	  xlog_param(xl, "only-if-exists", BOOLEAN, FETCH8(data, 1));
+	  req->replies = 1;
+	}
 	break;
       case 17:
 	xlog_request_name(xl, req, "GetAtomName", TRUE);
 	xlog_param(xl, "atom", ATOM, FETCH32(data, 4));
+	req->atomnum = FETCH32(data, 4);
 	req->replies = 1;
 	break;
       case 18:
@@ -4576,16 +4657,26 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	/* InternAtom */
 	xlog_param(xl, "atom", ATOM | SPECVAL, FETCH32(data, 8),
 		   "None", 0, (char *)NULL);
-	/* FIXME: here we ought to add to our own list of atom ids, having
-	 * recorded enough machine-readable data in req to do so */
+	if (req->atomname) {
+	    internatom(xl->atoms, req->atomname, READ32(data + 8));
+	    req->atomname = NULL;
+	}
 	break;
       case 17:
 	/* GetAtomName */
-	xlog_param(xl, "name", STRING,
-		   FETCH16(data, 8),
-		   STRING(data, 32, FETCH16(data, 8)));
-	/* FIXME: here we ought to add to our own list of atom ids, having
-	 * recorded enough machine-readable data in req to do so */
+        {
+	  unsigned long atomlen;
+	  char *atomstr;
+	  atomlen = FETCH16(data, 8);
+	  atomstr = STRING(data, 32, atomlen);
+	  if (!xl->overflow) {
+	      char *atomname = snewn(atomlen + 1, char);
+	      memcpy(atomname, atomstr, atomlen);
+	      atomname[atomlen] = '\0';
+	      internatom(xl->atoms, atomname, req->atomnum);
+	  }
+	  xlog_param(xl, "name", STRING, atomlen, atomstr);
+	}
 	break;
       case 20:
 	/* GetProperty */
