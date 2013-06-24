@@ -1139,7 +1139,8 @@ void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 		break;
 	      case ATOM:
 	        {
-		  const struct atom *a = find234(xl->atoms, &ival, atomfind);
+                  unsigned long lval = ival;
+		  const struct atom *a = find234(xl->atoms, &lval, atomfind);
 		  if (a != NULL) {
 		      xlog_text(xl, "a\"");
 		      print_c_string(xl, a->atomname, strlen(a->atomname));
