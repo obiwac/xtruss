@@ -5388,15 +5388,8 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_response_done(req, xl->textbuf);
     }
 
-    if (req->replies == 1) {
-	struct request *newhead = xl->rhead->next;
-	free_request(xl->rhead);
-	xl->rhead = newhead;
-	if (xl->rhead)
-	    xl->rhead->prev = NULL;
-	else
-	    xl->rtail = NULL;
-    }
+    if (req->replies == 1)
+	req->replies = 0; /* Not expecting more replies */
 }
 
 const char *xlog_translate_error(int errcode)
@@ -5584,17 +5577,10 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     xlog_response_done(req, xl->textbuf);
 
     /*
-     * Dequeue this request, now we've seen an error response to it.
+     * Don't expect any further response to this request.
      */
-    if (xl->rhead) {
-	struct request *newhead = xl->rhead->next;
-	free_request(xl->rhead);
-	xl->rhead = newhead;
-	if (xl->rhead)
-	    xl->rhead->prev = NULL;
-	else
-	    xl->rtail = NULL;
-    }
+    if (xl->rhead)
+	xl->rhead->replies = 0;
 }
 
 void xlog_do_event(struct xlog *xl, const void *vdata, int len)
@@ -6016,11 +6002,8 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
 		if (xl->rhead->replies) {
 		    /* A request that expected a reply got none. Report that. */
 		    xlog_do_reply(xl, xl->rhead, NULL, 0);
-		    /* That will have taken the request off the list itself. */
-		} else {
-		    sfree(xl->rhead->text);
-		    sfree(xl->rhead);
 		}
+		free_request(xl->rhead);
 		xl->rhead = nexthead;
 	    }
 	    if (xl->rhead)
