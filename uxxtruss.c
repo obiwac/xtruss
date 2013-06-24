@@ -4496,7 +4496,6 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	if (req->replies != 3)
 	    xlog_printf(xl, "<no reply received?!>");
 	req->replies = 1;	       /* force discard */
-	xl->textbuflen = 0;	       /* inhibit printing of actual reply */
     } else switch (req->opcode) {
       case 3:
 	/* GetWindowAttributes */
