@@ -466,7 +466,7 @@ struct xlog *xlog_new(int type)
     for (i = 0; i < 128; i++)
 	xl->extevents[i] = NULL, xl->extidevents[i] = 0;
     for (i = 0; i < 256; i++)
-	xl->exterrors[i] = NULL, xl->extidevents[i] = 0;
+	xl->exterrors[i] = NULL;
     xl->pixmapformats = NULL;
     xl->resdepths = newtree234(resdepthcmp);
     xl->atoms = newtree234(atomcmp);
