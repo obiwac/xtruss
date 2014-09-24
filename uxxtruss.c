@@ -6974,7 +6974,7 @@ void licence(void) {
 
 void version(void) {
 #ifdef PACKAGE_VERSION
-    printf("xtruss, revision %s\n", PACKAGE_VERSION);
+    printf("xtruss, version %s\n", PACKAGE_VERSION);
 #else
     printf("xtruss: version number unavailable when not built via automake\n");
 #endif

@@ -4,10 +4,15 @@
 
 module xtruss
 
+set Version $(!builddate).$(vcsid)
+
+# use perl to avoid inconsistent behaviour of echo '\v'
+in xtruss do perl -e 'print "\n\\versionid xtruss version $$ARGV[0]\n"' $(Version) >> xtruss.but
+
 # Build the man page.
 in xtruss do make doc
 
-in xtruss do sed '/AC_INIT/s/6.66/r$(revision)/' configure.ac > tmp.ac
+in xtruss do sed '/AC_INIT/s/6.66/$(Version)/' configure.ac > tmp.ac
 in xtruss do mv tmp.ac configure.ac
 in xtruss do aclocal
 in xtruss do autoconf
@@ -15,11 +20,11 @@ in xtruss do autoconf
 in xtruss do automake -a
 in xtruss do rm -rf autom4te.cache
 
-in . do cp -R xtruss xtruss-r$(revision)
-in . do rm xtruss-r$(revision)/GNUmakefile
-in . do tar chzvf xtruss-r$(revision).tar.gz xtruss-r$(revision)
+in . do cp -R xtruss xtruss-$(Version)
+in . do rm xtruss-$(Version)/GNUmakefile
+in . do tar chzvf xtruss-$(Version).tar.gz xtruss-$(Version)
 
 in xtruss do halibut --html=manpage.html xtruss.but
 
-deliver xtruss-r$(revision).tar.gz $@
+deliver xtruss-$(Version).tar.gz $@
 deliver xtruss/manpage.html $@
