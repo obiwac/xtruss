@@ -1744,7 +1744,20 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 	xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
 	xlog_param(xl, "type", ATOM, FETCH32(data, pos+8));
 	xlog_param(xl, "format", DECU, FETCH8(data, pos+1));
-	xlog_param(xl, "data", HEXSTRING1, 20, STRING(data, pos+12, 20));
+	switch (FETCH8(data, pos+1)) {
+	  case 8:
+	    xlog_param(xl, "data", STRING, 20, STRING(data, pos+12, 20));
+	    break;
+	  case 16:
+	    xlog_param(xl, "data", HEXSTRING2, 10, STRING(data, pos+12, 20));
+	    break;
+	  case 32:
+	    xlog_param(xl, "data", HEXSTRING4, 5, STRING(data, pos+12, 20));
+	    break;
+	  default:
+	    xlog_printf(xl, "<unknown format of data>");
+	    break;
+	}
 	xlog_printf(xl, ")");
 	break;
       case 34:
