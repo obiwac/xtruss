@@ -447,6 +447,8 @@ struct xlog *xlog_new(int type)
 {
     struct xlog *xl = snew(struct xlog);
     int i;
+    static unsigned newclientid = 0;
+
     xl->endianness = -1;	       /* as-yet-unknown */
     xl->c2sbuf = NULL;
     xl->c2sstate = 0;
@@ -461,7 +463,14 @@ struct xlog *xlog_new(int type)
     xl->rhead = xl->rtail = NULL;
     xl->nextseq = 1;
     xl->type = type;
-    xl->clientid = 0xFFFFFFFFU;	       /* means 'unknown yet' */
+    /*
+     * Fake a known-invalid and fairly unique client ID.  It will wrap around
+     * after 65536 clients, but that should be enough for most purposes.  In
+     * any case, its only use is for disambiguating interleaved server welcome
+     * messages in hex-dump output.
+     */
+    xl->clientid = 0xFFFF0000U | newclientid++;
+    newclientid &= 0xFFFF;
     for (i = 0; i < 128; i++)
 	xl->extreqs[i] = NULL, xl->extidreqs[i] = 0;
     for (i = 0; i < 128; i++)
@@ -581,8 +590,8 @@ void xlog_new_line(struct xlog *xl)
 	currreq = NULL;
     }
     if (print_client_ids) {
-	if (xl->clientid == 0xFFFFFFFFU)
-	    fprintf(xlogfp, "new-conn: ");
+        if ((xl->clientid & 0xFFFF0000U) == 0xFFFF0000U)
+	    fprintf(xlogfp, "new-%04x: ", xl->clientid & 0xFFFFU);
 	else
 	    fprintf(xlogfp, "%08x: ", xl->clientid);
     }
