@@ -405,6 +405,14 @@ static void internstdatoms(tree234 *atoms)
 	internatom(atoms, dupstr(stdatoms[i]), i+1);
 }
 
+static int atomeq(tree234 *atoms, unsigned long atomnum, char const *atomstr)
+{
+    const struct atom *a = find234(atoms, &atomnum, atomfind);
+    if (a != NULL)
+	return !strcmp(a->atomname, atomstr);
+    return FALSE;
+}
+
 struct xlog {
     int c2sstate, s2cstate;
     char *textbuf;
@@ -1752,7 +1760,27 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 	    xlog_param(xl, "data", HEXSTRING2, 10, STRING(data, pos+12, 20));
 	    break;
 	  case 32:
-	    xlog_param(xl, "data", HEXSTRING4, 5, STRING(data, pos+12, 20));
+	    if (atomeq(xl->atoms, FETCH32(data, pos+8), "_XIM_XCONNECT")) {
+	        unsigned maj = FETCH32(data, pos+16);
+		unsigned min = FETCH32(data, pos+20);
+	        xlog_param(xl, "data", SETBEGIN);
+	        xlog_param(xl, "window", WINDOW, FETCH32(data, pos+12));
+	        xlog_param(xl, "major-version", DECU, maj);
+	        xlog_param(xl, "minor-version", DECU, min);
+		/* Last field is only meaningful for two formats. */
+		if ((maj == 0 && min == 2) || (maj == 2 && min == 1))
+		    xlog_param(xl, "dividing-size", DECU,
+			       FETCH32(data, pos+24));
+		xlog_set_end(xl);
+	    } else if (atomeq(xl->atoms, FETCH32(data, pos+8),
+			      "_XIM_PROTOCOL")) {
+	        xlog_param(xl, "data", SETBEGIN);
+	        xlog_param(xl, "prop-length", DEC32, FETCH32(data, pos+12));
+	        xlog_param(xl, "prop-atom", ATOM, FETCH32(data, pos+16));
+		xlog_set_end(xl);
+	    } else  {
+	        xlog_param(xl, "data", HEXSTRING4, 5, STRING(data, pos+12, 20));
+	    }
 	    break;
 	  default:
 	    xlog_printf(xl, "<unknown format of data>");
