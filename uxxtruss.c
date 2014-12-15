@@ -224,6 +224,7 @@ int in_set(struct set *s, const char *string)
  */
 #define KNOWNEXTENSIONS(X) \
     X(EXT_BIGREQUESTS, "BIG-REQUESTS", 0, 0) \
+    X(EXT_GENERICEVENT, "Generic Event Extension", 0, 0) \
     X(EXT_MITSHM, "MIT-SHM", 1, 1) \
     X(EXT_RENDER, "RENDER", 5, 0)
 
@@ -1383,6 +1384,8 @@ const char *xlog_translate_event(int eventtype)
 	return "ClientMessage";
       case 34:
 	return "MappingNotify";
+      case 35:
+	return "GenericEvent";
       case EXT_MITSHM | 0:
 	return "ShmCompletion";
       default:
@@ -1742,6 +1745,14 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 		   "Modifier", 0, "Keyboard", 1, "Pointer", 2, (char *)NULL);
 	xlog_param(xl, "first-keycode", DECU, FETCH8(data, pos+5));
 	xlog_param(xl, "count", DECU, FETCH8(data, pos+6));
+	xlog_printf(xl, ")");
+	break;
+      case 35:
+	/* GenericEvent */
+	/* FIXME: need a decoding mechanism for these */
+	xlog_printf(xl, "(");
+	xlog_param(xl, "extension", DECU, FETCH8(data, pos+1));
+	xlog_param(xl, "evtype", HEX16, FETCH16(data, pos+8));
 	xlog_printf(xl, ")");
 	break;
       case EXT_MITSHM | 0:
@@ -3528,6 +3539,13 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	req->replies = 1;
 	break;
 
+      case EXT_GENERICEVENT | 0:
+	xlog_request_name(xl, req, "GEQueryVersion", TRUE);
+	xlog_param(xl, "client-major-version", DECU, FETCH16(data, 4));
+	xlog_param(xl, "client-minor-version", DECU, FETCH16(data, 6));
+	req->replies = 1;
+	break;
+
       case EXT_MITSHM | 0:
 	xlog_request_name(xl, req, "ShmQueryVersion", TRUE);
 	req->replies = 1;
@@ -5266,6 +5284,12 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 	xlog_param(xl, "maximum-request-length", DECU, FETCH32(data, 8));
 	break;
 
+      case EXT_GENERICEVENT | 0:
+	/* GEQueryVersion */
+	xlog_param(xl, "major-version", DECU, FETCH16(data, 8));
+	xlog_param(xl, "minor-version", DECU, FETCH16(data, 10));
+	break;
+
       case EXT_MITSHM | 0:
 	/* ShmQueryVersion */
 	xlog_param(xl, "shared-pixmaps", BOOLEAN, FETCH8(data, 1));
@@ -6061,15 +6085,15 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
      * 	- Errors. These are distinguished by their first byte being
      * 	  0, and all have a length of exactly 32 bytes.
      * 	- Events. These are distinguished by their first byte being
-     * 	  anything other than 0 or 1, and all have a length of
-     * 	  exactly 32 bytes too.
+     * 	  anything other than 0 or 1, and apart from GenericEvent all
+     * 	  have a length of exactly 32 bytes too.
      */
     while (1) {
 	/* Read the base 32 bytes of any server packet. */
 	read(xl, s2c, 32);
 
-	/* If it's a reply, read additional data if any. */
-	if (xl->s2cbuf[0] == 1) {
+	/* If it's a reply or a GenericEvent, read additional data if any. */
+	if (xl->s2cbuf[0] == 1 || xl->s2cbuf[0] == 35) {
 	    i = READ32(xl->s2cbuf + 4);
 	    readfrom(xl, s2c, 32 + i*4, 32);
 	}
