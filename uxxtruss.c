@@ -1326,7 +1326,7 @@ void xlog_charinfo(struct xlog *xl, const unsigned char *data,
 
 const char *xlog_translate_event(int eventtype)
 {
-    switch (eventtype & 0x7F) {
+    switch (eventtype & ~0x80) {
       case 2:
 	return "KeyPress";
       case 3:
