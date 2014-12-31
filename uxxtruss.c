@@ -1760,7 +1760,33 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 	    xlog_param(xl, "data", HEXSTRING2, 10, STRING(data, pos+12, 20));
 	    break;
 	  case 32:
-	    if (atomeq(xl->atoms, FETCH32(data, pos+8), "_XIM_XCONNECT")) {
+	    if (atomeq(xl->atoms, FETCH32(data, pos+8), "WM_PROTOCOLS")) {
+	        xlog_param(xl, "data", SETBEGIN);
+		xlog_param(xl, "protocol", ATOM, FETCH32(data, pos+12));
+		xlog_param(xl, "time", HEX32, FETCH32(data, pos+16));
+		if (atomeq(xl->atoms, FETCH32(data, pos+12),
+			   "WM_DELETE_WINDOW") ||
+		    atomeq(xl->atoms, FETCH32(data, pos+12),
+			   "WM_TAKE_FOCUS") ||
+		    atomeq(xl->atoms, FETCH32(data, pos+12),
+			   "WM_SAVE_YOURSELF"))
+		    /* No further fields */;
+		else if (atomeq(xl->atoms, FETCH32(data, pos+12),
+				"_NET_WM_PING"))
+		    xlog_param(xl, "client-window", WINDOW,
+			       FETCH32(data, pos+20));
+		else if (atomeq(xl->atoms, FETCH32(data, pos+12),
+				"_NET_WM_SYNC_REQUEST")) {
+		    xlog_param(xl, "update-request-number", SETBEGIN);
+		    xlog_param(xl, "hi", HEX32, FETCH32(data, pos+20));
+		    xlog_param(xl, "lo", HEX32, FETCH32(data, pos+20));
+		    xlog_set_end(xl);
+		} else
+		    xlog_param(xl, "protocol-data", HEXSTRING4, 3,
+			       STRING(data, pos+20, 12));
+		xlog_set_end(xl);
+	    } else if (atomeq(xl->atoms, FETCH32(data, pos+8),
+			      "_XIM_XCONNECT")) {
 	        unsigned maj = FETCH32(data, pos+16);
 		unsigned min = FETCH32(data, pos+20);
 	        xlog_param(xl, "data", SETBEGIN);
