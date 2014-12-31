@@ -219,33 +219,27 @@ int in_set(struct set *s, const char *string)
 
 /*
  * Parametric macro defining each known extension as an internal
- * identifier, its protocol-level string id, and the number of
- * errors and events it defines.
+ * identifier and its protocol-level string id.
  */
 #define KNOWNEXTENSIONS(X) \
-    X(EXT_BIGREQUESTS, "BIG-REQUESTS", 0, 0) \
-    X(EXT_GENERICEVENT, "Generic Event Extension", 0, 0) \
-    X(EXT_MITSHM, "MIT-SHM", 1, 1) \
-    X(EXT_RENDER, "RENDER", 5, 0)
+    X(EXT_BIGREQUESTS, "BIG-REQUESTS") \
+    X(EXT_GENERICEVENT, "Generic Event Extension") \
+    X(EXT_MITSHM, "MIT-SHM") \
+    X(EXT_RENDER, "RENDER")
 
 /*
  * Define the EXT_* ids as a series of values with the low 8 bits
  * clear.
  */
-#define EXTENUM(e,s,er,ev) dummy1##e, dummy2##e = dummy1##e+0xFE, e,
+#define EXTENUM(e,s) dummy1##e, dummy2##e = dummy1##e+0xFE, e,
 enum { dummy_min_ext = 0, KNOWNEXTENSIONS(EXTENUM) dummy_max_ext };
 
 /*
- * Declare arrays such that extnumerrors[ext>>8] and
- * extnumevents[ext>>8] give the number of errors and events defined
- * by each known extension, and extname[ext>>8] gives its name.
+ * Declare an array such that extname[ext>>8] gives the name of each
+ * known extension.
  */
-#define EXTNAME(e,s,er,ev) s,
+#define EXTNAME(e,s) s,
 const char *const extname[] = { NULL, KNOWNEXTENSIONS(EXTNAME) };
-#define EXTERRORS(e,s,er,ev) er,
-const int extnumerrors[] = { 0, KNOWNEXTENSIONS(EXTERRORS) };
-#define EXTEVENTS(e,s,er,ev) ev,
-const int extnumevents[] = { 0, KNOWNEXTENSIONS(EXTEVENTS) };
 
 struct request {
     struct request *next, *prev;
@@ -1413,7 +1407,7 @@ const char *xlog_translate_event(int eventtype)
 void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 		int *filter)
 {
-    int event;
+    int event, i;
     const char *name;
 
     xl->reqlogstate = 3;
@@ -1423,26 +1417,34 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 	xlog_printf(xl, "SendEvent-generated ");
 	event &= ~0x80;
     }
-    /* Translate events from extensions we know about */
-    if (xl->extidevents[event])
-	event = xl->extidevents[event];
-    name = xlog_translate_event(event);
+
+    name = NULL;
+    /* Work out if this is known to be an extension event. */
+    for (i = 0; event-i >= 0; i++)
+	if (xl->extevents[event-i]) {
+	    char const *extname = xl->extevents[event-i];
+	    if (xl->extidevents[event-i]) {
+		event = xl->extidevents[event-i] + i;
+		name = xlog_translate_event(event);
+	    }
+	    if (name == NULL)
+		xlog_printf(xl, "%s:UnknownEvent%d", extname, i);
+	    break;
+	}
+    /* If not, it's a core event or unknown. */
+    if (event-i < 0) {
+        name = xlog_translate_event(event);
+	if (!name)
+	    xlog_printf(xl, "UnknownEvent%d");
+    }
+
     if (name) {
 	if (filter)
 	    *filter = in_set(&events_to_log, name);
 	xlog_printf(xl, "%s", name);
     } else {
-	int i;
 	if (filter)
 	    *filter = in_set(&events_to_log, "UnknownEvent");
-	for (i = 0; event-i >= 0; i++)
-	    if (xl->extevents[event-i]) {
-		xlog_printf(xl, "%s:UnknownEvent%d",
-			    xl->extevents[event-i], i);
-		break;
-	    }
-	if (event-i < 0)
-	    xlog_printf(xl, "UnknownEvent%d");
     }
     switch (event) {
       case 2: case 3: case 4: case 5: case 6: case 7: case 8:
@@ -5177,22 +5179,16 @@ void xlog_do_reply(struct xlog *xl, struct request *req,
 		xl->extidreqs[opcode] = req->extid;
 	    }
 	    opcode = FETCH8(data, 10);
-	    if (opcode < 128 && !xl->extevents[opcode]) {
+	    if (opcode != 0 && opcode < 128 && !xl->extevents[opcode]) {
 		xl->extevents[opcode] = dupstr(req->extname);
-		if (req->extid) {
-		    int i;
-		    for (i = 0; i < extnumevents[req->extid >> 8]; i++)
-			xl->extidevents[opcode + i] = req->extid | i;
-		}
+		if (req->extid)
+		    xl->extidevents[opcode] = req->extid;
 	    }
 	    opcode = FETCH8(data, 11);
-	    if (!xl->exterrors[opcode]) {
+	    if (opcode != 0 && !xl->exterrors[opcode]) {
 		xl->exterrors[opcode] = dupstr(req->extname);
-		if (req->extid) {
-		    int i;
-		    for (i = 0; i < extnumerrors[req->extid >> 8]; i++)
-			xl->extiderrors[opcode + i] = req->extid | i;
-		}
+		if (req->extid)
+		    xl->extiderrors[opcode] = req->extid;
 	    }
 	}
 	break;
@@ -5642,7 +5638,7 @@ void xlog_do_error(struct xlog *xl, struct request *req,
 		   const void *vdata, int len)
 {
     const unsigned char *data = (const unsigned char *)vdata;
-    int errcode;
+    int errcode, i;
     const char *error;
 
     xl->textbuflen = 0;
@@ -5653,23 +5649,27 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     xl->reqlogstate = 3;	       /* for things with parameters */
 
     errcode = FETCH8(data, 1);
-    /* Translate errors from extensions we know about */
-    if (xl->extiderrors[errcode])
-	errcode = xl->extiderrors[errcode];
-    error = xlog_translate_error(errcode);
-    if (error)
-	xlog_printf(xl, "%s", error);
-    else {
-	int i;
-	for (i = 0; errcode-i >= 0; i++)
-	    if (xl->exterrors[errcode-i]) {
-		xlog_printf(xl, "%s:UnknownError%d",
-			    xl->exterrors[errcode-i], i);
-		break;
+    /* Work out if this is known to be an extension error. */
+    for (i = 0; errcode-i >= 0; i++)
+	if (xl->exterrors[errcode-i]) {
+	    char const *extname = xl->exterrors[errcode-i];
+	    if (xl->extiderrors[errcode-i]) {
+		errcode = xl->extiderrors[errcode-i] + i;
+		error = xlog_translate_error(errcode);
 	    }
-	if (errcode-i < 0)
+	    if (error == NULL)
+		xlog_printf(xl, "%s:UnknownError%d", extname, i);
+	    break;
+	}
+    /* If not, it's a core error or unknown. */
+    if (errcode-i < 0) {
+        error = xlog_translate_error(errcode);
+	if (!error)
 	    xlog_printf(xl, "UnknownError%d");
     }
+    if (error)
+	xlog_printf(xl, "%s", error);
+
     switch (errcode) {
       case 1:
 	/* BadRequest */
