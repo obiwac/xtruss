@@ -228,14 +228,19 @@ int in_set(struct set *s, const char *string)
     X(EXT_RENDER, "RENDER")
 
 /*
- * Define the EXT_* ids as a series of values with the low 8 bits
+ * The number of bits left that the extension number is shifted in
+ * request/event/error numbers.
+ */
+#define EXTSHIFT 8
+/*
+ * Define the EXT_* ids as a series of values with the low EXTSHIFT bits
  * clear.
  */
-#define EXTENUM(e,s) dummy1##e, dummy2##e = dummy1##e+0xFE, e,
+#define EXTENUM(e,s) dummy1##e, dummy2##e = dummy1##e+(1<<EXTSHIFT)-2, e,
 enum { dummy_min_ext = 0, KNOWNEXTENSIONS(EXTENUM) dummy_max_ext };
 
 /*
- * Declare an array such that extname[ext>>8] gives the name of each
+ * Declare an array such that extname[ext>>EXTSHIFT] gives the name of each
  * known extension.
  */
 #define EXTNAME(e,s) s,
@@ -3379,7 +3384,7 @@ void xlog_do_request(struct xlog *xl, const void *vdata, int len)
 	    int i;
 	    for (i = 1; i < lenof(extname); i++) {
 		if (!strcmp(req->extname, extname[i])) {
-		    req->extid = i << 8;
+		    req->extid = i << EXTSHIFT;
 		    break;
 		}
 	    }
