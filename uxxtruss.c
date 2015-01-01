@@ -231,7 +231,7 @@ int in_set(struct set *s, const char *string)
  * The number of bits left that the extension number is shifted in
  * request/event/error numbers.
  */
-#define EXTSHIFT 8
+#define EXTSHIFT 17
 /*
  * Define the EXT_* ids as a series of values with the low EXTSHIFT bits
  * clear.
@@ -245,6 +245,9 @@ enum { dummy_min_ext = 0, KNOWNEXTENSIONS(EXTENUM) dummy_max_ext };
  */
 #define EXTNAME(e,s) s,
 const char *const extname[] = { NULL, KNOWNEXTENSIONS(EXTNAME) };
+
+/* Flag to indicate that an event is a GenericEvent */
+#define GENERICEVENT 0x10000
 
 struct request {
     struct request *next, *prev;
@@ -1400,8 +1403,6 @@ const char *xlog_translate_event(int eventtype)
 	return "ClientMessage";
       case 34:
 	return "MappingNotify";
-      case 35:
-	return "GenericEvent";
       case EXT_MITSHM | 0:
 	return "ShmCompletion";
       default:
@@ -1424,7 +1425,25 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
     }
 
     name = NULL;
-    if (event < 64) {
+    if (event == 35) {
+	/* GenericEvent */
+	int opcode = FETCH8(data, 1);
+	int gevent = FETCH16(data, 8);
+	char const *extname = NULL;
+	if (opcode >= 128) {
+	    extname = xl->extreqs[opcode-128];
+	    if (xl->extidreqs[opcode-128]) {
+		event = xl->extidreqs[opcode-128] | GENERICEVENT | gevent;
+		name = xlog_translate_event(event);
+	    }
+	}
+	if (name == NULL) {
+	    if (extname != NULL)
+		xlog_printf(xl, "%s:UnknownGenericEvent%d", extname, gevent);
+	    else
+		xlog_printf(xl, "%d:UnknownGenericEvent%d", opcode, gevent);
+	}
+    } else if (event < 64) {
 	/* Core event */
 	name = xlog_translate_event(event);
 	if (name == NULL)
@@ -1831,14 +1850,6 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 		   "Modifier", 0, "Keyboard", 1, "Pointer", 2, (char *)NULL);
 	xlog_param(xl, "first-keycode", DECU, FETCH8(data, pos+5));
 	xlog_param(xl, "count", DECU, FETCH8(data, pos+6));
-	xlog_printf(xl, ")");
-	break;
-      case 35:
-	/* GenericEvent */
-	/* FIXME: need a decoding mechanism for these */
-	xlog_printf(xl, "(");
-	xlog_param(xl, "extension", DECU, FETCH8(data, pos+1));
-	xlog_param(xl, "evtype", HEX16, FETCH16(data, pos+8));
 	xlog_printf(xl, ")");
 	break;
       case EXT_MITSHM | 0:
