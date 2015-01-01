@@ -1424,23 +1424,26 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
     }
 
     name = NULL;
-    /* Work out if this is known to be an extension event. */
-    for (i = 0; event-i >= 0; i++)
-	if (xl->extevents[event-i]) {
-	    char const *extname = xl->extevents[event-i];
-	    if (xl->extidevents[event-i]) {
-		event = xl->extidevents[event-i] + i;
-		name = xlog_translate_event(event);
-	    }
-	    if (name == NULL)
-		xlog_printf(xl, "%s:UnknownEvent%d", extname, i);
-	    break;
-	}
-    /* If not, it's a core event or unknown. */
-    if (event-i < 0) {
-        name = xlog_translate_event(event);
-	if (!name)
+    if (event < 64) {
+	/* Core event */
+	name = xlog_translate_event(event);
+	if (name == NULL)
 	    xlog_printf(xl, "UnknownEvent%d");
+    } else {
+	/* Extension event */
+	for (i = 0; event-i >= 64; i++)
+	    if (xl->extevents[event-i]) {
+		char const *extname = xl->extevents[event-i];
+		if (xl->extidevents[event-i]) {
+		    event = xl->extidevents[event-i] + i;
+		    name = xlog_translate_event(event);
+		}
+		if (name == NULL)
+		    xlog_printf(xl, "%s:UnknownEvent%d", extname, i);
+		break;
+	    }
+	if (event-i < 64)
+	    xlog_printf(xl, "UnknownEvent%d", event);
     }
 
     if (name) {
@@ -5654,23 +5657,27 @@ void xlog_do_error(struct xlog *xl, struct request *req,
     xl->reqlogstate = 3;	       /* for things with parameters */
 
     errcode = FETCH8(data, 1);
-    /* Work out if this is known to be an extension error. */
-    for (i = 0; errcode-i >= 0; i++)
-	if (xl->exterrors[errcode-i]) {
-	    char const *extname = xl->exterrors[errcode-i];
-	    if (xl->extiderrors[errcode-i]) {
-		errcode = xl->extiderrors[errcode-i] + i;
-		error = xlog_translate_error(errcode);
-	    }
-	    if (error == NULL)
-		xlog_printf(xl, "%s:UnknownError%d", extname, i);
-	    break;
-	}
-    /* If not, it's a core error or unknown. */
-    if (errcode-i < 0) {
-        error = xlog_translate_error(errcode);
-	if (!error)
+    error = NULL;
+    if (errcode < 128) {
+	/* Core error */
+	error = xlog_translate_error(errcode);
+	if (error == NULL)
 	    xlog_printf(xl, "UnknownError%d");
+    } else {
+	/* Extension error */
+	for (i = 0; errcode-i >= 128; i++)
+	    if (xl->exterrors[errcode-i]) {
+		char const *extname = xl->exterrors[errcode-i];
+		if (xl->extiderrors[errcode-i]) {
+		    errcode = xl->extiderrors[errcode-i] + i;
+		    error = xlog_translate_error(errcode);
+		}
+		if (error == NULL)
+		    xlog_printf(xl, "%s:UnknownError%d", extname, i);
+		break;
+	    }
+	if (errcode-i < 128)
+	    xlog_printf(xl, "UnknownError%d", errcode);
     }
     if (error)
 	xlog_printf(xl, "%s", error);
