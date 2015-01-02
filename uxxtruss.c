@@ -1861,6 +1861,7 @@ void xlog_event(struct xlog *xl, const unsigned char *data, int len, int pos,
 	xlog_param(xl, "major-event", DECU, FETCH8(data, pos+14));
 	xlog_param(xl, "offset", HEX32, FETCH32(data, pos+16));
 	xlog_printf(xl, ")");
+        break;
       default:
 	/* unknown event */
 	break;
