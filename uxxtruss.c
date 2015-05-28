@@ -7373,14 +7373,20 @@ int main(int argc, char **argv)
     /* FIXME: do we need to initialise more of cfg? */
 
     if (logfile) {
-	xlogfp = fopen(logfile, "w");
-	if (!xlogfp) {
-	    fprintf(stderr, "xtruss: open(\"%s\"): %s\n", logfile,
-		    strerror(errno));
-	    return 1;
-	}
-    } else
+        if (!strcmp(logfile, "-")) {
+            xlogfp = stdout;
+            logfile = NULL;            /* inhibit later fclose */
+        } else {
+            xlogfp = fopen(logfile, "w");
+            if (!xlogfp) {
+                fprintf(stderr, "xtruss: open(\"%s\"): %s\n", logfile,
+                        strerror(errno));
+                return 1;
+            }
+        }
+    } else {
 	xlogfp = stderr;
+    }
 
     signal(SIGCHLD, sigchld);
     x11disp = x11_setup_display(cfg.x11_display, X11_MIT, &cfg);

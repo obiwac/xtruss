@@ -138,8 +138,9 @@ of every request it understands, no matter how big. Default is 256.
 
 \dt \cw{-o} \e{filename}
 
-\dd Send the trace output to the specified file. The default is to
-log to standard error.
+\dd Send the trace output to the specified file, or to standard output
+if \e{filename} is just \cq{-}. The default is to log to standard
+error.
 
 \dt \cw{-e} [\e{class}\cw{=}][\cw{!}]\e{item}[\cw{,}\e{item}...]
 
