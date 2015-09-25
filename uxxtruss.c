@@ -1235,7 +1235,7 @@ void xlog_request_done(struct xlog *xl, struct request *req)
 /* Indicate that we're about to print a response to a particular request */
 void xlog_respond_to(struct xlog *xl, struct request *req)
 {
-    if (!req->printed)
+    if (req && !req->printed)
 	return;
 
     if (req != NULL && currreq == req) {
