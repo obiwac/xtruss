@@ -9,19 +9,22 @@ set Version $(!builddate).$(vcsid)
 # use perl to avoid inconsistent behaviour of echo '\v'
 in xtruss do perl -e 'print "\n\\versionid xtruss version $$ARGV[0]\n"' $(Version) >> xtruss.but
 
-# Build the man page.
-in xtruss do make doc
-
 in xtruss do sed '/AC_INIT/s/6.66/$(Version)/' configure.ac > tmp.ac
 in xtruss do mv tmp.ac configure.ac
-in xtruss do aclocal
-in xtruss do autoconf
-# in xtruss do autoheader   # reinstate if we need a config.h
-in xtruss do automake -a
-in xtruss do rm -rf autom4te.cache
+in xtruss do ./autogen.sh
+
+# Build the man page. This also tests the automake setup to ensure
+# configure actually works; but we use a self-delegation (i.e. do all
+# of this in a throwaway copy of the build directory) to avoid
+# accidentally shipping any outputs of configure. Instead we return
+# only the actual man page from the delegation environment.
+delegate -
+  in xtruss do ./configure
+  in xtruss do make doc
+  return xtruss/*.1
+enddelegate
 
 in . do cp -R xtruss xtruss-$(Version)
-in . do rm xtruss-$(Version)/GNUmakefile
 in . do tar chzvf xtruss-$(Version).tar.gz xtruss-$(Version)
 
 in xtruss do halibut --html=manpage.html xtruss.but
