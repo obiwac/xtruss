@@ -1152,9 +1152,11 @@ int proxy_socks5_negotiate (Proxy_Socket p, int change)
 		char userpwbuf[514];
 		int ulen, plen;
 		ulen = strlen(p->cfg.proxy_username);
-		if (ulen > 255) ulen = 255; if (ulen < 1) ulen = 1;
+		if (ulen > 255) ulen = 255;
+		if (ulen < 1) ulen = 1;
 		plen = strlen(p->cfg.proxy_password);
-		if (plen > 255) plen = 255; if (plen < 1) plen = 1;
+		if (plen > 255) plen = 255;
+		if (plen < 1) plen = 1;
 		userpwbuf[0] = 1;      /* version number of subnegotiation */
 		userpwbuf[1] = ulen;
 		memcpy(userpwbuf+2, p->cfg.proxy_username, ulen);
