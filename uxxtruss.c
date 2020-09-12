@@ -6942,6 +6942,11 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
             if (exit_on_xrecord_client_quit)
                 exit(0);
             break;
+          case 2:
+            /*
+             * An X client has connected. (Only expected if we're in
+             * a "record all clients" type of mode.)
+             */
 	  default:
 	    fprintf(stderr, "xtruss: unexpected data record type received "
 		    "(%d)\n", c->xrecordbuf[1]);
