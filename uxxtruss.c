@@ -172,6 +172,7 @@ int sizelimit = 256;
 int print_server_startup = FALSE;
 int raw_hex_dump = FALSE;
 int print_client_ids = FALSE;
+int exit_on_xrecord_client_quit = TRUE;
 int num_clients_seen = 0;
 
 struct set {
@@ -6936,9 +6937,11 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	    break;
 	  case 3:
 	    /*
-	     * The client has exited. Successful termination!
+	     * An X client has disconnected.
 	     */
-	    exit(0);
+            if (exit_on_xrecord_client_quit)
+                exit(0);
+            break;
 	  default:
 	    fprintf(stderr, "xtruss: unexpected data record type received "
 		    "(%d)\n", c->xrecordbuf[1]);
