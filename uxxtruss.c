@@ -7104,6 +7104,20 @@ void version(void) {
 #endif
 }
 
+static int parse_hex(const char *str, unsigned *output)
+{
+    int len = strlen(str);
+    int scanned = -1;
+
+    if (sscanf(str, "%x%n", output, &scanned) == 1 && scanned == len)
+        return TRUE;
+    if (sscanf(str, "0x%x%n", output, &scanned) == 1 && scanned == len)
+        return TRUE;
+    if (sscanf(str, "0X%x%n", output, &scanned) == 1 && scanned == len)
+        return TRUE;
+    return FALSE;
+}
+
 int main(int argc, char **argv)
 {
     int *fdlist;
@@ -7220,9 +7234,7 @@ int main(int argc, char **argv)
 			    selectclient = TRUE;
 			} else {
 			    selectclient = FALSE;
-			    if (!sscanf(val, "%x", &clientid) &&
-				!sscanf(val, "0x%x", &clientid) &&
-				!sscanf(val, "0X%x", &clientid)) {
+                            if (!parse_hex(val, &clientid)) {
 				fprintf(stderr, "xtruss: option '-p' expects"
 					" either a hex resource id or '-'\n");
 				return 1;
