@@ -7065,6 +7065,9 @@ const char usagemsg[] =
 "  usage: xtruss [options] command [command arguments]       trace a new program\n"
 "     or: xtruss [options] -p <resource id>     trace an X client by resource id\n"
 "     or: xtruss [options] -p -         trace an X client selected interactively\n"
+"     or: xtruss [options] -p all       trace all clients of the X server\n"
+"     or: xtruss [options] -p current   trace clients already connected\n"
+"     or: xtruss [options] -p future    trace clients that connect in future\n"
 "     or: xtruss [options] -P           just run a logging proxy server\n"
 "options: -s <length>             set approximate limit on line length\n"
 "         -o <file>               send log output to a file (default=stderr)\n"
@@ -7256,11 +7259,23 @@ int main(int argc, char **argv)
 			xrecord = TRUE;
 			if (!strcmp(val, "-")) {
 			    selectclient = TRUE;
+                        } else if (!strcmp(val, "current")) {
+                            clientid = 1;
+                            print_client_ids = TRUE;
+                            exit_on_xrecord_client_quit = FALSE;
+                        } else if (!strcmp(val, "future")) {
+                            clientid = 2;
+                            print_client_ids = TRUE;
+                            exit_on_xrecord_client_quit = FALSE;
+                        } else if (!strcmp(val, "all")) {
+                            clientid = 3;
+                            print_client_ids = TRUE;
+                            exit_on_xrecord_client_quit = FALSE;
 			} else {
 			    selectclient = FALSE;
                             if (!parse_hex(val, &clientid)) {
-				fprintf(stderr, "xtruss: option '-p' expects"
-					" either a hex resource id or '-'\n");
+				fprintf(stderr, "xtruss: invalid argument '%s'"
+                                        " to option '-p'\n", val);
 				return 1;
 			    }
 			}
