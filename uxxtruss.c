@@ -6428,6 +6428,21 @@ int start_xproxy(const Config *cfg, int mindisplaynum)
     return mindisplaynum;
 }
 
+static char *welcome_message = NULL;
+static size_t welcome_message_len = 0;
+static tree234 *xlogs_by_id;
+int xlog_cmp_id(void *av, void *bv)
+{
+    struct xlog *a = (struct xlog *)av, *b = (struct xlog *)bv;
+    return a->clientid < b->clientid ? -1 : a->clientid > b->clientid ? +1 : 0;
+}
+int xlog_find_id(void *av, void *bv)
+{
+    unsigned aid = *(unsigned *)av;
+    struct xlog *b = (struct xlog *)bv;
+    return aid < b->clientid ? -1 : aid > b->clientid ? +1 : 0;
+}
+
 /*
  * Make our own connection to the X display with intent to use the X
  * RECORD extension to eavesdrop on an existing client.
@@ -6441,7 +6456,6 @@ void start_xrecord(const Config *cfg, int select, unsigned clientid)
     c->type = 1;		       /* X RECORD channel */
     c->xrecordbuf = NULL;
     c->xrecordlen = c->xrecordlimit = c->xrecordsize = 0;
-    c->xl = xlog_new(1);  /* type 1 = recording from after connection setup */
 
     /*
      * Start an X connection for which proxy-side authorisation will
@@ -6508,11 +6522,19 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	rootoffset += 8 * c->xrecordbuf[29];
 	c->rootwin = GET_32BIT_MSB_FIRST(c->xrecordbuf + rootoffset);
     }
+
     /*
-     * Also, extract the pixmap formats, which we'll need if the
-     * process we're 'tracing' sends an image in either direction.
+     * Save our own welcome message, which we'll use to initialise
+     * each xlog instance we create while tracing.
      */
-    xlog_use_welcome_message(c->xl, c->xrecordbuf, c->xrecordlen);
+    welcome_message_len = c->xrecordlen;
+    welcome_message = snewn(c->xrecordlen, char);
+    memcpy(welcome_message, c->xrecordbuf, c->xrecordlen);
+
+    /*
+     * Make a tree to keep our xlog instances in, one per client id.
+     */
+    xlogs_by_id = newtree234(xlog_cmp_id);
 
     /*
      * Simple means of allocating a small number of resource ids in
@@ -6869,30 +6891,6 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
     buf[47] = 1;		       /* but do want client-died */
     x11_send(c->xs, buf, 48);
 
-    if (print_client_ids) {
-	/*
-	 * If we're unconditionally printing client ids, we should
-	 * call RecordGetContext to find out the official id for the
-	 * client we've just attached to. (If we identified it by an
-	 * actual resource rather than by its resource base, the
-	 * value we already know will have extra bits set.)
-	 */
-	buf[0] = c->xrecordopcode; buf[1] = 4;/* RecordGetContext */
-	PUT_16BIT_MSB_FIRST(buf+2, 2);     /* request length */
-	PUT_32BIT_MSB_FIRST(buf+4, RCID);  /* context id */
-	x11_send(c->xs, buf, 8);
-	do {
-	    read(c, xrecord, 32);
-	    if (c->xrecordbuf[0] == 1)
-		readfrom(c, xrecord,
-			 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
-	} while (c->xrecordbuf[0] > 1);/* ignore events */
-	EXPECT_REPLY("RecordGetContext");
-	if (c->xrecordlen >= 36) {
-	    c->xl->clientid = GET_32BIT_MSB_FIRST(c->xrecordbuf + 32);
-	}
-    }
-
     buf[0] = c->xrecordopcode; buf[1] = 5;/* RecordEnableContext */
     PUT_16BIT_MSB_FIRST(buf+2, 2);     /* request length */
     PUT_32BIT_MSB_FIRST(buf+4, RCID);  /* context id */
@@ -6903,6 +6901,9 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
      * that last request.
      */
     while (1) {
+        unsigned our_id;
+        struct xlog *our_xl;
+
 	do {
 	    read(c, xrecord, 32);
 	    if (c->xrecordbuf[0] == 1)
@@ -6910,6 +6911,19 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 			 32+4*GET_32BIT_MSB_FIRST(c->xrecordbuf + 4), 32);
 	} while (c->xrecordbuf[0] > 1);/* ignore events */
 	EXPECT_REPLY("RecordEnableContext");
+
+        our_id = GET_32BIT_MSB_FIRST(c->xrecordbuf+12);
+        our_xl = find234(xlogs_by_id, &our_id, xlog_find_id);
+        if (!our_xl) {
+            our_xl = xlog_new(1); /* type 1 = recording from after
+                                   * connection setup */
+            our_xl->clientid = our_id;
+            struct xlog *added = add234(xlogs_by_id, our_xl);
+            assert(added == our_xl);
+            xlog_use_welcome_message(
+                our_xl, welcome_message, welcome_message_len);
+        }
+
 	switch (c->xrecordbuf[1]) {
 	  case 4:
 	    /*
@@ -6922,9 +6936,9 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	     * Data from the client, i.e. requests. Expect it to
 	     * come with a header telling us its sequence number.
 	     */
-	    c->xl->endianness = c->xrecordbuf[9]?'l':'B';
-	    c->xl->nextseq = GET_32BIT_MSB_FIRST(c->xrecordbuf+20);
-	    xlog_c2s(c->xl, c->xrecordbuf + 32, c->xrecordlen - 32);
+	    our_xl->endianness = c->xrecordbuf[9]?'l':'B';
+	    our_xl->nextseq = GET_32BIT_MSB_FIRST(c->xrecordbuf+20);
+	    xlog_c2s(our_xl, c->xrecordbuf + 32, c->xrecordlen - 32);
 	    break;
 	  case 0:
 	    /*
@@ -6932,8 +6946,8 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	     * events. Expect it to come with a header telling us
 	     * its sequence number.
 	     */
-	    c->xl->endianness = c->xrecordbuf[9]?'l':'B';
-	    xlog_s2c(c->xl, c->xrecordbuf + 32, c->xrecordlen - 32);
+	    our_xl->endianness = c->xrecordbuf[9]?'l':'B';
+	    xlog_s2c(our_xl, c->xrecordbuf + 32, c->xrecordlen - 32);
 	    break;
 	  case 3:
 	    /*
@@ -6941,6 +6955,8 @@ void xrecord_gotdata(struct ssh_channel *c, const void *vdata, int len)
 	     */
             if (exit_on_xrecord_client_quit)
                 exit(0);
+            del234(xlogs_by_id, our_xl);
+            xlog_free(our_xl);
             break;
           case 2:
             /*
