@@ -6,7 +6,6 @@
 #include "ssh.h"
 #include "sshcr.h"
 #include "xtruss.h"
-#include "xtruss-macros.h"
 
 struct winq {
     unsigned winid;
@@ -22,8 +21,7 @@ struct xrecord_state {
 
     tree234 *xlogs_by_id;
 
-    unsigned char *xrecordbuf;
-    int xrecordlen, xrecordlimit, xrecordsize;
+    strbuf *buf;
     unsigned rbase, rmask, rootwin, clientid, xrecordopcode, wmsatom;
     struct winq *whead, *wtail;
 
@@ -136,32 +134,33 @@ static void xrecord_coroutine(struct xrecord_state *xr,
      * [FIXME: what are we supposed to do in a multi-screen
      * situation?]
      */
-    read(xr, xrecord, 8);
-    readfrom(xr, xrecord, 8+4*GET_16BIT_MSB_FIRST(xr->xrecordbuf + 6), 8);
-    if (xr->xrecordbuf[0] != 1) {
-        int n = xr->xrecordbuf[1];
-        if (n > xr->xrecordlen - 8)
-            n = xr->xrecordlen - 8;
+    strbuf_clear(xr->buf);
+    crReadUpTo(xr->buf, 8);
+    crReadUpTo(xr->buf, 8 + 4*GET_16BIT_MSB_FIRST(xr->buf->u + 6));
+    if (xr->buf->u[0] != 1) {
+        int n = xr->buf->u[1];
+        if (n > xr->buf->len - 8)
+            n = xr->buf->len - 8;
         fprintf(stderr, "xtruss: X server denied authorisation (\"%.*s\")\n",
-                n, xr->xrecordbuf + 8);
+                n, xr->buf->u + 8);
         exit(1);
     }
-    xr->rbase = GET_32BIT_MSB_FIRST(xr->xrecordbuf + 12);
-    xr->rmask = GET_32BIT_MSB_FIRST(xr->xrecordbuf + 16);
+    xr->rbase = GET_32BIT_MSB_FIRST(xr->buf->u + 12);
+    xr->rmask = GET_32BIT_MSB_FIRST(xr->buf->u + 16);
     {
-        int rootoffset = GET_16BIT_MSB_FIRST(xr->xrecordbuf + 24);
+        int rootoffset = GET_16BIT_MSB_FIRST(xr->buf->u + 24);
         rootoffset = 40 + ((rootoffset + 3) & ~3);
-        rootoffset += 8 * xr->xrecordbuf[29];
-        xr->rootwin = GET_32BIT_MSB_FIRST(xr->xrecordbuf + rootoffset);
+        rootoffset += 8 * xr->buf->u[29];
+        xr->rootwin = GET_32BIT_MSB_FIRST(xr->buf->u + rootoffset);
     }
 
     /*
      * Save our own welcome message, which we'll use to initialise
      * each xlog instance we create while tracing.
      */
-    xr->welcome_message = snewn(xr->xrecordlen, char);
-    memcpy(xr->welcome_message, xr->xrecordbuf, xr->xrecordlen);
-    xr->welcome_message_len = xr->xrecordlen;
+    xr->welcome_message = snewn(xr->buf->len, char);
+    memcpy(xr->welcome_message, xr->buf->u, xr->buf->len);
+    xr->welcome_message_len = xr->buf->len;
 
     /*
      * Simple means of allocating a small number of resource ids in
@@ -189,39 +188,39 @@ static void xrecord_coroutine(struct xrecord_state *xr,
      * Read the reply, which hopefully will say Success and tell us
      * the major opcode for the extension.
      */
-    read(xr, xrecord, 32);
-    if (xr->xrecordbuf[0] == 1)
-        readfrom(xr, xrecord,
-                 32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
+    strbuf_clear(xr->buf);
+    crReadUpTo(xr->buf, 32);
+    if (xr->buf->u[0] == 1)
+        crReadUpTo(xr->buf, 32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u + 4));
 
 #define EXPECT_REPLY(name) do { \
-    if (xr->xrecordbuf[0] == 0) { \
-        const char *err = xlog_translate_error(xr->xrecordbuf[1]); \
+    if (xr->buf->u[0] == 0) { \
+        const char *err = xlog_translate_error(xr->buf->u[1]); \
         if (err) \
             fprintf(stderr, "xtruss: X server returned %s error to" \
                     " %s\n", err, name); \
         else \
             fprintf(stderr, "xtruss: X server returned unknown error %d to" \
-                    " %s\n", xr->xrecordbuf[1], name); \
+                    " %s\n", xr->buf->u[1], name); \
         exit(1); \
-    } else if (xr->xrecordbuf[0] != 1) { \
-        const char *ev = xlog_translate_event(xr->xrecordbuf[0]); \
+    } else if (xr->buf->u[0] != 1) { \
+        const char *ev = xlog_translate_event(xr->buf->u[0]); \
         if (ev) \
             fprintf(stderr, "xtruss: unexpected event received (%s)\n", ev); \
         else \
             fprintf(stderr, "xtruss: unexpected event received (%d)\n", \
-                    xr->xrecordbuf[0]); \
+                    xr->buf->u[0]); \
         exit(1); \
     } \
 } while (0)
 
     EXPECT_REPLY("QueryExtension");
-    if (xr->xrecordbuf[8] != 1) {
+    if (xr->buf->u[8] != 1) {
         fprintf(stderr, "xtruss: cannot use -p: X server does not support"
                 " the X RECORD extension\n");
         exit(1);
     }
-    xr->xrecordopcode = xr->xrecordbuf[9];
+    xr->xrecordopcode = xr->buf->u[9];
 
     /*
      * Now initialise the RECORD extension.
@@ -235,10 +234,10 @@ static void xrecord_coroutine(struct xrecord_state *xr,
     /*
      * Read the reply, which hopefully will say Success.
      */
-    read(xr, xrecord, 32);
-    if (xr->xrecordbuf[0] == 1)
-        readfrom(xr, xrecord,
-                 32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
+    strbuf_clear(xr->buf);
+    crReadUpTo(xr->buf, 32);
+    if (xr->buf->u[0] == 1)
+        crReadUpTo(xr->buf, 32  + 4*GET_32BIT_MSB_FIRST(xr->buf->u+4));
     EXPECT_REPLY("RecordQueryVersion");
 
     if (xr->xs->xrselectclient) {
@@ -297,20 +296,20 @@ static void xrecord_coroutine(struct xrecord_state *xr,
          * for a ButtonPress event which will give us a resource id
          * to trace.
          */
-        read(xr, xrecord, 32);
-        if (xr->xrecordbuf[0] == 1)
-            readfrom(xr, xrecord,
-                     32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
+        strbuf_clear(xr->buf);
+        crReadUpTo(xr->buf, 32);
+        if (xr->buf->u[0] == 1)
+            crReadUpTo(xr->buf, 32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u + 4));
         EXPECT_REPLY("GrabPointer");
-        if (xr->xrecordbuf[1] != 0) {
+        if (xr->buf->u[1] != 0) {
             char reason[32];
-            switch (xr->xrecordbuf[1]) {
+            switch (xr->buf->u[1]) {
               case 1: sprintf(reason, "AlreadyGrabbed"); break;
               case 2: sprintf(reason, "InvalidTime"); break;
               case 3: sprintf(reason, "NotViewable"); break;
               case 4: sprintf(reason, "Frozen"); break;
               default: sprintf(reason, "unknown error code %d",
-                               xr->xrecordbuf[1]); break;
+                               xr->buf->u[1]); break;
             }
             fprintf(stderr, "xtruss: could not grab mouse pointer for window"
                     " selection: %s\n", reason);
@@ -320,34 +319,34 @@ static void xrecord_coroutine(struct xrecord_state *xr,
         /*
          * Wait for our ButtonPress.
          */
-        read(xr, xrecord, 32);
-        if (xr->xrecordbuf[0] == 1)
-            readfrom(xr, xrecord,
-                     32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
+        strbuf_clear(xr->buf);
+        crReadUpTo(xr->buf, 32);
+        if (xr->buf->u[0] == 1)
+            crReadUpTo(xr->buf, 32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u + 4));
 #define EXPECT_EVENT(num) do { \
-    if (xr->xrecordbuf[0] == 0) { \
-        const char *err = xlog_translate_error(xr->xrecordbuf[1]); \
+    if (xr->buf->u[0] == 0) { \
+        const char *err = xlog_translate_error(xr->buf->u[1]); \
         if (err) \
             fprintf(stderr, "xtruss: X server returned unexpected %s " \
                     "error\n", err); \
         else \
             fprintf(stderr, "xtruss: X server returned unexpected and " \
-                    "unknown error %d\n", xr->xrecordbuf[1]); \
+                    "unknown error %d\n", xr->buf->u[1]); \
         exit(1); \
-    } else if (xr->xrecordbuf[0] == 1) { \
+    } else if (xr->buf->u[0] == 1) { \
         fprintf(stderr, "xtruss: unexpected reply received\n"); \
-    } else if ((xr->xrecordbuf[0] & 0x7F) != num) { \
-        const char *ev = xlog_translate_event(xr->xrecordbuf[0]); \
+    } else if ((xr->buf->u[0] & 0x7F) != num) { \
+        const char *ev = xlog_translate_event(xr->buf->u[0]); \
         if (ev) \
             fprintf(stderr, "xtruss: unexpected event received (%s)\n", ev); \
         else \
             fprintf(stderr, "xtruss: unexpected event received (%d)\n", \
-                    xr->xrecordbuf[0]); \
+                    xr->buf->u[0]); \
         exit(1); \
     } \
 } while (0)
         EXPECT_EVENT(4);
-        xr->clientid = GET_32BIT_MSB_FIRST(xr->xrecordbuf + 16);
+        xr->clientid = GET_32BIT_MSB_FIRST(xr->buf->u + 16);
 
         /*
          * We've got our base window id. Now we can ungrab the
@@ -395,13 +394,13 @@ static void xrecord_coroutine(struct xrecord_state *xr,
         memcpy(buf+8, "WM_STATE", 8);  /* name */
         sk_write(xr->sock, buf, 16);
         do {
-            read(xr, xrecord, 32);
-            if (xr->xrecordbuf[0] == 1)
-                readfrom(xr, xrecord,
-                         32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
-        } while (xr->xrecordbuf[0] > 1);/* ignore events */
+            strbuf_clear(xr->buf);
+            crReadUpTo(xr->buf, 32);
+            if (xr->buf->u[0] == 1)
+                crReadUpTo(xr->buf, 32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u+4));
+        } while (xr->buf->u[0] > 1);/* ignore events */
         EXPECT_REPLY("InternAtom");
-        xr->wmsatom = GET_32BIT_MSB_FIRST(xr->xrecordbuf + 8);
+        xr->wmsatom = GET_32BIT_MSB_FIRST(xr->buf->u + 8);
         if (!xr->wmsatom) {
             /*
              * The WM_STATE atom is not understood by the server at
@@ -432,13 +431,14 @@ static void xrecord_coroutine(struct xrecord_state *xr,
             PUT_32BIT_MSB_FIRST(buf+20, 0); /* long-length */
             sk_write(xr->sock, buf, 24);
             do {
-                read(xr, xrecord, 32);
-                if (xr->xrecordbuf[0] == 1)
-                    readfrom(xr, xrecord,
-                             32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
-            } while (xr->xrecordbuf[0] > 1);/* ignore events */
+                strbuf_clear(xr->buf);
+                crReadUpTo(xr->buf, 32);
+                if (xr->buf->u[0] == 1)
+                    crReadUpTo(xr->buf,
+                               32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u+4));
+            } while (xr->buf->u[0] > 1);/* ignore events */
             EXPECT_REPLY("GetProperty");
-            if (GET_32BIT_MSB_FIRST(xr->xrecordbuf+8) != 0) {
+            if (GET_32BIT_MSB_FIRST(xr->buf->u+8) != 0) {
                 /*
                  * Found it!
                  */
@@ -462,22 +462,23 @@ static void xrecord_coroutine(struct xrecord_state *xr,
             PUT_32BIT_MSB_FIRST(buf+4, xr->whead->winid); /* window */
             sk_write(xr->sock, buf, 8);
             do {
-                read(xr, xrecord, 32);
-                if (xr->xrecordbuf[0] == 1)
-                    readfrom(xr, xrecord,
-                             32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
-            } while (xr->xrecordbuf[0] > 1);/* ignore events */
+                strbuf_clear(xr->buf);
+                crReadUpTo(xr->buf, 32);
+                if (xr->buf->u[0] == 1)
+                    crReadUpTo(xr->buf,
+                               32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u+4));
+            } while (xr->buf->u[0] > 1);/* ignore events */
             EXPECT_REPLY("QueryTree");
             {
-                int i, n = GET_16BIT_MSB_FIRST(xr->xrecordbuf + 16);
-                if (n > (xr->xrecordlen - 32) / 4)
-                    n = (xr->xrecordlen - 32) / 4;   /* buffer overrun check */
+                int i, n = GET_16BIT_MSB_FIRST(xr->buf->u + 16);
+                if (n > (xr->buf->len - 32) / 4)
+                    n = (xr->buf->len - 32) / 4;   /* buffer overrun check */
                 for (i = 0; i < n; i++) {
                     xr->wtail->next = snew(struct winq);
                     xr->wtail = xr->wtail->next;
                     xr->wtail->next = NULL;
                     xr->wtail->winid =
-                        GET_32BIT_MSB_FIRST(xr->xrecordbuf + 32 + 4*i);
+                        GET_32BIT_MSB_FIRST(xr->buf->u + 32 + 4*i);
                 }
             }
             /*
@@ -532,14 +533,14 @@ static void xrecord_coroutine(struct xrecord_state *xr,
         struct xlog *our_xl;
 
         do {
-            read(xr, xrecord, 32);
-            if (xr->xrecordbuf[0] == 1)
-                readfrom(xr, xrecord,
-                         32+4*GET_32BIT_MSB_FIRST(xr->xrecordbuf + 4), 32);
-        } while (xr->xrecordbuf[0] > 1);/* ignore events */
+            strbuf_clear(xr->buf);
+            crReadUpTo(xr->buf, 32);
+            if (xr->buf->u[0] == 1)
+                crReadUpTo(xr->buf, 32 + 4*GET_32BIT_MSB_FIRST(xr->buf->u+4));
+        } while (xr->buf->u[0] > 1);/* ignore events */
         EXPECT_REPLY("RecordEnableContext");
 
-        our_id = GET_32BIT_MSB_FIRST(xr->xrecordbuf+12);
+        our_id = GET_32BIT_MSB_FIRST(xr->buf->u+12);
         our_xl = find234(xr->xlogs_by_id, &our_id, xlog_find_id);
         if (!our_xl) {
             our_xl = xlog_new(xr->xs, XLOG_BARE);
@@ -550,7 +551,7 @@ static void xrecord_coroutine(struct xrecord_state *xr,
                                      xr->welcome_message_len);
         }
 
-        switch (xr->xrecordbuf[1]) {
+        switch (xr->buf->u[1]) {
           case 4:
             /*
              * StartOfData record, sent immediately after we enabled
@@ -562,9 +563,9 @@ static void xrecord_coroutine(struct xrecord_state *xr,
              * Data from the client, i.e. requests. Expect it to
              * come with a header telling us its sequence number.
              */
-            xlog_set_endianness(our_xl, xr->xrecordbuf[9] ? 'l' : 'B');
-            xlog_set_next_seq(our_xl, GET_32BIT_MSB_FIRST(xr->xrecordbuf+20));
-            xlog_c2s(our_xl, xr->xrecordbuf + 32, xr->xrecordlen - 32);
+            xlog_set_endianness(our_xl, xr->buf->u[9] ? 'l' : 'B');
+            xlog_set_next_seq(our_xl, GET_32BIT_MSB_FIRST(xr->buf->u+20));
+            xlog_c2s(our_xl, xr->buf->u + 32, xr->buf->len - 32);
             break;
           case 0:
             /*
@@ -572,8 +573,8 @@ static void xrecord_coroutine(struct xrecord_state *xr,
              * events. Expect it to come with a header telling us
              * its sequence number.
              */
-            xlog_set_endianness(our_xl, xr->xrecordbuf[9] ? 'l' : 'B');
-            xlog_s2c(our_xl, xr->xrecordbuf + 32, xr->xrecordlen - 32);
+            xlog_set_endianness(our_xl, xr->buf->u[9] ? 'l' : 'B');
+            xlog_s2c(our_xl, xr->buf->u + 32, xr->buf->len - 32);
             break;
           case 3:
             /*
@@ -591,7 +592,7 @@ static void xrecord_coroutine(struct xrecord_state *xr,
              */
           default:
             fprintf(stderr, "xtruss: unexpected data record type received "
-                    "(%d)\n", xr->xrecordbuf[1]);
+                    "(%d)\n", xr->buf->u[1]);
             break;
         }
     }
@@ -606,6 +607,7 @@ void xtruss_xrecord_start(xtruss_state *xs)
     xr->xs = xs;
     xr->xlogs_by_id = newtree234(xlog_cmp_id);
     xr->clientid = xs->xrclientid;
+    xr->buf = strbuf_new();
 
     xr->plug.vt = &xrecord_plugvt;
     xr->sock = sk_new(sk_addr_dup(xs->x11disp->addr), xs->x11disp->port,

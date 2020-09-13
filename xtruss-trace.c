@@ -6,7 +6,6 @@
 #include "ssh.h"
 #include "sshcr.h"
 #include "xtruss.h"
-#include "xtruss-macros.h"
 
 /* ----------------------------------------------------------------------
  * Code to parse and log the data flowing (in both directions)
@@ -31,6 +30,16 @@ static inline uint32_t GET_24BIT_MSB_FIRST(const void *vp)
     return (((uint32_t)p[2]      ) | ((uint32_t)p[1] <<  8) |
             ((uint32_t)p[0] << 16));
 }
+
+/*
+ * Macro wrappers to take X endianness into account (plus READ8 for
+ * visual consistency).
+ */
+#define READ8(p) ((unsigned char)*(p))
+#define READ16(p) (xl->endianness == 'l' ? \
+                   GET_16BIT_LSB_FIRST(p) : GET_16BIT_MSB_FIRST(p))
+#define READ32(p) (xl->endianness == 'l' ? \
+                   GET_32BIT_LSB_FIRST(p) : GET_32BIT_MSB_FIRST(p))
 
 /*
  * Translate a bits-per-image-element count into an appropriate
@@ -226,10 +235,8 @@ static bool atomeq(tree234 *atoms, unsigned long atomnum,
 struct xlog {
     struct xtruss_state *xs;
     int c2sstate, s2cstate;
-    strbuf *textbuf;
-    unsigned char *c2sbuf, *s2cbuf;
-    int c2slen, c2slimit, c2ssize;
-    int s2clen, s2climit, s2csize;
+    strbuf *textbuf, *c2sbuf, *s2cbuf;
+    unsigned c2stmp, s2ctmp;
     unsigned c2soff, s2coff;
     char *extreqs[128];      /* extension name for each >=128 request opcode */
     char *extevents[128];    /* name of extension based at a given event */
@@ -269,12 +276,8 @@ struct xlog *xlog_new(xtruss_state *xs, XLogType type)
 
     xl->xs = xs;
     xl->endianness = -1;               /* as-yet-unknown */
-    xl->c2sbuf = NULL;
-    xl->c2sstate = 0;
-    xl->c2ssize = 0;
-    xl->s2cbuf = NULL;
-    xl->s2cstate = 0;
-    xl->s2csize = 0;
+    xl->c2sbuf = strbuf_new();
+    xl->s2cbuf = strbuf_new();
     xl->c2soff = xl->s2coff = 0;
     xl->error = false;
     xl->textbuf = strbuf_new();
@@ -335,8 +338,8 @@ void xlog_free(struct xlog *xl)
     for (i = 0; i < 256; i++)
         sfree(xl->exterrors[i]);
     sfree(xl->pixmapformats);
-    sfree(xl->c2sbuf);
-    sfree(xl->s2cbuf);
+    strbuf_free(xl->c2sbuf);
+    strbuf_free(xl->s2cbuf);
     strbuf_free(xl->textbuf);
     sfree(xl);
 }
@@ -5588,9 +5591,8 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
 {
     const unsigned char *data = (const unsigned char *)vdata;
     /*
-     * Remember that variables declared auto in this function may
-     * not be used across a crReturn, and hence also read() or
-     * ignore().
+     * Remember that variables declared auto in this function may not
+     * be used across a crReturn, and hence also crReadUpTo().
      */
     int i;
 
@@ -5608,13 +5610,14 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
         /*
          * Endianness byte and subsequent padding byte.
          */
-        read(xl, c2s, 1);
-        if (xl->c2sbuf[0] == 'l' || xl->c2sbuf[0] == 'B') {
-            xl->endianness = xl->c2sbuf[0];
+        strbuf_clear(xl->c2sbuf);
+        crReadUpTo(xl->c2sbuf, 2);
+        if (xl->c2sbuf->s[0] == 'l' || xl->c2sbuf->s[0] == 'B') {
+            xl->endianness = xl->c2sbuf->s[0];
         } else {
-            err((xl, "initial endianness byte (0x%02X) unrecognised", *data));
+            err((xl, "initial endianness byte (0x%02X) unrecognised",
+                 (unsigned)xl->c2sbuf->u[0]));
         }
-        ignore(xl, c2s, 1);
 
         /*
          * Protocol major and minor version, and authorisation
@@ -5625,24 +5628,29 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
          * data, both for security reasons and because we're
          * meddling with them ourselves in any case.
          */
-        read(xl, c2s, 8);
-        if ((i = READ16(xl->c2sbuf)) != 11)
+        strbuf_clear(xl->c2sbuf);
+        crReadUpTo(xl->c2sbuf, 10);
+        if ((i = READ16(xl->c2sbuf->u)) != 11)
             err((xl, "major protocol version (0x%04X) unrecognised", i));
-        if ((i = READ16(xl->c2sbuf + 2)) != 0)
+        if ((i = READ16(xl->c2sbuf->u + 2)) != 0)
             warn((xl, "minor protocol version (0x%04X) unrecognised", i));
-        i = READ16(xl->c2sbuf + 4);
+        i = READ16(xl->c2sbuf->u + 4);
         i = (i + 3) &~ 3;
-        i += READ16(xl->c2sbuf + 6);
+        i += READ16(xl->c2sbuf->u + 6);
         i = (i + 3) &~ 3;
-        ignore(xl, c2s, 2 + i);
+        strbuf_clear(xl->c2sbuf);
+        xl->c2stmp = i;
+        crReadUpTo(xl->c2sbuf, xl->c2stmp);
+        strbuf_clear(xl->c2sbuf);
     }
 
     /*
      * Now we expect a steady stream of X requests.
      */
     while (1) {
-        read(xl, c2s, 4);
-        i = READ16(xl->c2sbuf + 2);
+        strbuf_clear(xl->c2sbuf);
+        crReadUpTo(xl->c2sbuf, 4);
+        i = READ16(xl->c2sbuf->u + 2);
         if (i == 0) {
             /*
              * A zero length field means an extended request packet,
@@ -5652,9 +5660,10 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
              * because in -p mode we might have tuned in after that
              * went past.
              */
-            readfrom(xl, c2s, 8, 4);
-            i = READ32(xl->c2sbuf + 4);
-            readfrom(xl, c2s, i*4, 8);
+            crReadUpTo(xl->c2sbuf, 8);
+            i = READ32(xl->c2sbuf->u + 4);
+            xl->c2stmp = i*4;
+            crReadUpTo(xl->c2sbuf, xl->c2stmp);
             /*
              * Shift the first four bytes of the packet upwards, so
              * as to remove the inserted extra length word. Then
@@ -5663,11 +5672,12 @@ void xlog_c2s(struct xlog *xl, const void *vdata, int len)
              * being zero because we're passing the real length as a
              * separate parameter and it will look at that instead.
              */
-            memcpy(xl->c2sbuf + 4, xl->c2sbuf, 4);
-            xlog_do_request(xl, xl->c2sbuf + 4, xl->c2slen - 4);
+            memcpy(xl->c2sbuf->u + 4, xl->c2sbuf->u, 4);
+            xlog_do_request(xl, xl->c2sbuf->u + 4, xl->c2sbuf->len - 4);
         } else {
-            readfrom(xl, c2s, i*4, 4);
-            xlog_do_request(xl, xl->c2sbuf, xl->c2slen);
+            xl->c2stmp = i*4;
+            crReadUpTo(xl->c2sbuf, xl->c2stmp);
+            xlog_do_request(xl, xl->c2sbuf->u, xl->c2sbuf->len);
         }
     }
 
@@ -5702,12 +5712,14 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
          * that header.
          */
         while (1) {
-            read(xl, s2c, 8);
+            strbuf_clear(xl->s2cbuf);
+            crReadUpTo(xl->s2cbuf, 8);
             if (xl->endianness == -1)
                 err((xl, "server reply received before client sent endianness"));
 
-            i = READ16(xl->s2cbuf + 6);
-            readfrom(xl, s2c, 8+i*4, 8);
+            i = READ16(xl->s2cbuf->u + 6);
+            xl->s2ctmp = 8 + i*4;
+            crReadUpTo(xl->s2cbuf, xl->s2ctmp);
 
             /*
              * The byte at the front of one of these packets is 0
@@ -5730,31 +5742,35 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
              * only need to stick a 'continue' at the end of
              * handling a type-2 packet to make this change.)
              */
-            if (xl->s2cbuf[0] == 0)
+            if (xl->s2cbuf->u[0] == 0) {
+                ptrlen pl;
+                pl.ptr = xl->s2cbuf->u + 8;
+                pl.len = min(xl->s2cbuf->len - 8, xl->s2cbuf->u[1]);
                 err((xl, "server refused authorisation, reason \"%.*s\"",
-                     min(xl->s2clen-8, xl->s2cbuf[1]), xl->s2cbuf + 8));
-            else if (xl->s2cbuf[0] == 2)
+                     PTRLEN_PRINTF(pl)));
+            } else if (xl->s2cbuf->u[0] == 2) {
                 err((xl, "server sent incomplete-authorisation packet, which"
                      " is unsupported by xtruss"));
-            else if (xl->s2cbuf[0] != 1)
+            } else if (xl->s2cbuf->u[0] != 1) {
                 err((xl, "server sent unrecognised authorisation-time opcode %d",
-                     xl->s2cbuf[0]));
+                     xl->s2cbuf->u[0]));
+            }
 
             /*
              * Now we're sitting on a successful authorisation
              * packet. Optionally log it.
              */
-            if (xl->s2clen < 16) {
+            if (xl->s2cbuf->len < 16) {
                 err((xl, "server's init message was far too short\n"));
             }
-            xl->clientid = READ32(xl->s2cbuf + 12);
+            xl->clientid = READ32(xl->s2cbuf->u + 12);
             if (++xl->xs->num_clients_seen > 1)
                 xl->xs->print_client_ids = true;
 
             if (xl->xs->print_server_startup) {
                 /* variables on which the FETCH macros depend */
-                const unsigned char *data = xl->s2cbuf;
-                int len = xl->s2clen;
+                const unsigned char *data = xl->s2cbuf->u;
+                int len = xl->s2cbuf->len;
 
                 strbuf_clear(xl->textbuf);
                 put_datastr(xl->textbuf, "--- server init message: ");
@@ -5905,7 +5921,7 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
              * to decode PutImage and GetImage requests during the
              * protocol.
              */
-            xlog_use_welcome_message(xl, xl->s2cbuf, xl->s2clen);
+            xlog_use_welcome_message(xl, xl->s2cbuf->u, xl->s2cbuf->len);
             break;
         }
     }
@@ -5926,12 +5942,14 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
      */
     while (1) {
         /* Read the base 32 bytes of any server packet. */
-        read(xl, s2c, 32);
+        strbuf_clear(xl->s2cbuf);
+        crReadUpTo(xl->s2cbuf, 32);
 
         /* If it's a reply or a GenericEvent, read additional data if any. */
-        if (xl->s2cbuf[0] == 1 || xl->s2cbuf[0] == 35) {
-            i = READ32(xl->s2cbuf + 4);
-            readfrom(xl, s2c, 32 + i*4, 32);
+        if (xl->s2cbuf->u[0] == 1 || xl->s2cbuf->u[0] == 35) {
+            i = READ32(xl->s2cbuf->u + 4);
+            xl->s2ctmp = 32 + i*4;
+            crReadUpTo(xl->s2cbuf, xl->s2ctmp);
         }
 
         /*
@@ -5944,11 +5962,11 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
          * event, but we also treat extension events we don't
          * recognise as potential exceptions.
          */
-        if ((xl->s2cbuf[0] & 0x7f) != 11 &&
-            (xl->s2cbuf[0] < 2 ||
-             xl->extidevents[xl->s2cbuf[0] & 0x7f] ||
-             xlog_translate_event(xl->s2cbuf[0] & 0x7f))) {
-            i = READ16(xl->s2cbuf + 2);
+        if ((xl->s2cbuf->u[0] & 0x7f) != 11 &&
+            (xl->s2cbuf->u[0] < 2 ||
+             xl->extidevents[xl->s2cbuf->u[0] & 0x7f] ||
+             xlog_translate_event(xl->s2cbuf->u[0] & 0x7f))) {
+            i = READ16(xl->s2cbuf->u + 2);
             while (xl->rhead && (xl->rhead->seqnum & 0xFFFF) != i) {
                 struct request *nexthead = xl->rhead->next;
                 if (xl->rhead->replies) {
@@ -5968,12 +5986,12 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
          * Now we can hand off to the individual functions that
          * separately process the three packet types.
          */
-        if (xl->s2cbuf[0] == 1) {
-            xlog_do_reply(xl, xl->rhead, xl->s2cbuf, xl->s2clen);
-        } else if (xl->s2cbuf[0] == 0) {
-            xlog_do_error(xl, xl->rhead, xl->s2cbuf, xl->s2clen);
+        if (xl->s2cbuf->u[0] == 1) {
+            xlog_do_reply(xl, xl->rhead, xl->s2cbuf->u, xl->s2cbuf->len);
+        } else if (xl->s2cbuf->u[0] == 0) {
+            xlog_do_error(xl, xl->rhead, xl->s2cbuf->u, xl->s2cbuf->len);
         } else {
-            xlog_do_event(xl, xl->s2cbuf, xl->s2clen);
+            xlog_do_event(xl, xl->s2cbuf->u, xl->s2cbuf->len);
         }
     }
 

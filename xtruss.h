@@ -29,6 +29,7 @@ struct xtruss_state {
     int n_x11sockets;
 
     unsigned num_clients_seen;
+    unsigned newclientid;
     struct request *currreq;
     int exit_status;           /* set to >= 0 when it's time to die */
 
@@ -65,3 +66,30 @@ void xlog_use_welcome_message(struct xlog *xl, const void *vdata, int len);
 
 const char *xlog_translate_error(int errcode);
 const char *xlog_translate_event(int eventtype);
+
+/*
+ * Macro used in coroutine-structured parts of the code. Expects the
+ * coroutine to have a variable 'data' of char-pointer type, and 'len'
+ * of integer type, containing the last data block passed to the
+ * coroutine. Collects data from those variables, calling crReturnV as
+ * necessary to fill them up, and appends it to the output strbuf
+ * until that strbuf has at least the desired length.
+ *
+ * This macro isn't safe against side effects in its parameters: it
+ * can't be, because it can't unilaterally allocate more space to
+ * store copies of them in any structure preserved across crReturn.
+ *
+ * Note also that the parameters themselves must be expressions that
+ * can survive a crReturn!
+ */
+#define crReadUpTo(sb, desired_length) do {                             \
+        while ((sb)->len < (desired_length)) {                          \
+            while (len <= 0)                                            \
+                crReturnV;                                              \
+            size_t Need = (desired_length) - (sb)->len;                 \
+            size_t Got = (Need < len ? Need : len);                     \
+            put_data(sb, data, Got);                                    \
+            data += Got;                                                \
+            len -= Got;                                                 \
+        }                                                               \
+    } while (0)
