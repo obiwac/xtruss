@@ -226,8 +226,7 @@ static bool atomeq(tree234 *atoms, unsigned long atomnum,
 struct xlog {
     struct xtruss_state *xs;
     int c2sstate, s2cstate;
-    char *textbuf;
-    int textbuflen, textbufsize;
+    strbuf *textbuf;
     unsigned char *c2sbuf, *s2cbuf;
     int c2slen, c2slimit, c2ssize;
     int s2clen, s2climit, s2csize;
@@ -278,8 +277,7 @@ struct xlog *xlog_new(xtruss_state *xs, XLogType type)
     xl->s2csize = 0;
     xl->c2soff = xl->s2coff = 0;
     xl->error = false;
-    xl->textbuf = NULL;
-    xl->textbuflen = xl->textbufsize = 0;
+    xl->textbuf = strbuf_new();
     xl->rhead = xl->rtail = NULL;
     xl->nextseq = 1;
     xl->type = type;
@@ -339,7 +337,7 @@ void xlog_free(struct xlog *xl)
     sfree(xl->pixmapformats);
     sfree(xl->c2sbuf);
     sfree(xl->s2cbuf);
-    sfree(xl->textbuf);
+    strbuf_free(xl->textbuf);
     sfree(xl);
 }
 
@@ -377,34 +375,8 @@ static void xlog_error(struct xlog *xl, const char *fmt, ...)
 #define err(args) do { xlog_error args; crReturnV; } while (0)
 #define warn(args) do { xlog_error args; crReturnV; } while (0)
 
-static void xlog_text_len(struct xlog *xl, const char *buf, int len)
-{
-    if (xl->textbuflen + len >= xl->textbufsize) {
-        xl->textbufsize = (xl->textbuflen + len) * 5 / 4 + 1024;
-        xl->textbuf = sresize(xl->textbuf, xl->textbufsize, char);
-    }
-    memcpy(xl->textbuf + xl->textbuflen, buf, len);
-    xl->textbuflen += len;
-    xl->textbuf[xl->textbuflen] = '\0';
-}
-
-static void xlog_text(struct xlog *xl, const char *buf)
-{
-    xlog_text_len(xl, buf, strlen(buf));
-}
-
-static void xlog_printf(struct xlog *xl, const char *fmt, ...)
-{
-    char *tmp;
-    va_list ap;
-
-    va_start(ap, fmt);
-    tmp = dupvprintf(fmt, ap);
-    va_end(ap);
-
-    xlog_text(xl, tmp);
-    sfree(tmp);
-}
+/* Convenience macro for appending a fixed string to a strbuf, minus its \0 */
+#define put_datastr(bs, str) put_datapl(bs, ptrlen_from_asciz(str))
 
 static void print_c_string(struct xlog *xl, const char *data, int len)
 {
@@ -412,21 +384,21 @@ static void print_c_string(struct xlog *xl, const char *data, int len)
         char c = *data++;
 
         if (c == '\n')
-            xlog_text(xl, "\\n");
+            put_datastr(xl->textbuf, "\\n");
         else if (c == '\r')
-            xlog_text(xl, "\\r");
+            put_datastr(xl->textbuf, "\\r");
         else if (c == '\t')
-            xlog_text(xl, "\\t");
+            put_datastr(xl->textbuf, "\\t");
         else if (c == '\b')
-            xlog_text(xl, "\\b");
+            put_datastr(xl->textbuf, "\\b");
         else if (c == '\\')
-            xlog_text(xl, "\\\\");
+            put_datastr(xl->textbuf, "\\\\");
         else if (c == '"')
-            xlog_text(xl, "\\\"");
+            put_datastr(xl->textbuf, "\\\"");
         else if (c >= 32 && c <= 126)
-            xlog_text_len(xl, &c, 1);
+            put_byte(xl->textbuf, c);
         else
-            xlog_printf(xl, "\\%03o", (unsigned char)c);
+            strbuf_catf(xl->textbuf, "\\%03o", (unsigned char)c);
     }
 }
 
@@ -442,14 +414,14 @@ static void writemaskv(struct xlog *xl, int ival, va_list ap)
             break;
         svi = va_arg(ap, int);
         if (svi & ival) {
-            xlog_text(xl, sep);
-            xlog_text(xl, svname);
+            put_datastr(xl->textbuf, sep);
+            put_datastr(xl->textbuf, svname);
             sep = "|";
         }
     }
 
     if (!*sep)
-        xlog_text(xl, "0");            /* special case: no flags set */
+        put_byte(xl->textbuf, '0');   /* special case: no flags set */
 }
 
 static void writemask(struct xlog *xl, int ival, ...)
@@ -465,7 +437,7 @@ static void xlog_request_name(struct xlog *xl, struct request *req,
 {
     if (!in_set(&xl->xs->requests_to_log, known ? buf : "UnknownRequest"))
         req->printed = false;
-    xlog_printf(xl, "%s", buf);
+    put_datastr(xl->textbuf, buf);
     xl->reqlogstate = 0;
 }
 
@@ -537,21 +509,21 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
     int ival, ival2;
 
     if (xl->reqlogstate == 0) {
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 1;
     } else if (xl->reqlogstate == 3) {
         xl->reqlogstate = 1;
     } else {
-        xlog_printf(xl, ", ");
+        put_datastr(xl->textbuf, ", ");
     }
     if (xl->overflow && xl->reqlogstate != 2) {
-        xlog_printf(xl, "<packet ends prematurely>");
+        put_datastr(xl->textbuf, "<packet ends prematurely>");
         xl->reqlogstate = 2;
     } else {
         /* FIXME: perhaps optionally omit parameter names? */
-        xlog_text(xl, paramname);
+        put_datastr(xl->textbuf, paramname);
         if ((type &~ SPECVAL) != NOTEVENEQUALSIGN)
-            xlog_text(xl, "=");
+            put_byte(xl->textbuf, '=');
         va_start(ap, type);
         switch (type &~ SPECVAL) {
           case STRING:
@@ -559,8 +531,8 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             sval = va_arg(ap, const char *);
 
             trail = "";
-            if (sizelimit > 0 && xl->textbuflen + ival > sizelimit) {
-                int limitlen = sizelimit - xl->textbuflen;
+            if (sizelimit > 0 && xl->textbuf->len + ival > sizelimit) {
+                int limitlen = sizelimit - xl->textbuf->len;
                 if (limitlen < 20)
                     limitlen = 20;
                 if (ival > limitlen) {
@@ -569,17 +541,18 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                 }
             }
 
-            xlog_text(xl, "\"");
+            put_byte(xl->textbuf, '\"');
             print_c_string(xl, sval, ival);
-            xlog_printf(xl, "\"%s", trail);
+            put_byte(xl->textbuf, '\"');
+            put_datastr(xl->textbuf, trail);
             break;
           case HEXSTRING1:
             ival = va_arg(ap, int);
             sval = va_arg(ap, const char *);
 
             trail = "";
-            if (sizelimit > 0 && xl->textbuflen + 3*ival-1 > sizelimit) {
-                int limitlen = (sizelimit - xl->textbuflen + 1) / 3;
+            if (sizelimit > 0 && xl->textbuf->len + 3*ival-1 > sizelimit) {
+                int limitlen = (sizelimit - xl->textbuf->len + 1) / 3;
                 if (limitlen < 8)
                     limitlen = 8;
                 if (ival > limitlen) {
@@ -591,12 +564,12 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             sep = "";
             while (ival-- > 0) {
                 unsigned val = 0xFF & *sval;
-                xlog_printf(xl, "%s%02X", sep, val);
+                strbuf_catf(xl->textbuf, "%s%02X", sep, val);
                 sval++;
                 sep = ":";
             }
             if (*trail)
-                xlog_printf(xl, "%s%s", sep, trail);
+                strbuf_catf(xl->textbuf, "%s%s", sep, trail);
             break;
           case HEXSTRING2:
           case HEXSTRING2B:
@@ -608,8 +581,8 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             sval = va_arg(ap, const char *);
 
             trail = "";
-            if (sizelimit > 0 && xl->textbuflen + 5*ival-1 > sizelimit) {
-                int limitlen = (sizelimit - xl->textbuflen + 1) / 5;
+            if (sizelimit > 0 && xl->textbuf->len + 5*ival-1 > sizelimit) {
+                int limitlen = (sizelimit - xl->textbuf->len + 1) / 5;
                 if (limitlen < 4)
                     limitlen = 4;
                 if (ival > limitlen) {
@@ -625,12 +598,14 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                     val = GET_16BIT_LSB_FIRST(sval);
                 else
                     val = GET_16BIT_MSB_FIRST(sval);
-                xlog_printf(xl, "%s%04X", sep, val);
+                strbuf_catf(xl->textbuf, "%s%04X", sep, val);
                 sval += 2;
                 sep = ":";
             }
-            if (*trail)
-                xlog_printf(xl, "%s%s", sep, trail);
+            if (*trail) {
+                put_datastr(xl->textbuf, sep);
+                put_datastr(xl->textbuf, trail);
+            }
             break;
           case HEXSTRING3:
           case HEXSTRING3B:
@@ -642,8 +617,8 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             sval = va_arg(ap, const char *);
 
             trail = "";
-            if (sizelimit > 0 && xl->textbuflen + 7*ival-1 > sizelimit) {
-                int limitlen = (sizelimit - xl->textbuflen + 1) / 7;
+            if (sizelimit > 0 && xl->textbuf->len + 7*ival-1 > sizelimit) {
+                int limitlen = (sizelimit - xl->textbuf->len + 1) / 7;
                 if (limitlen < 2)
                     limitlen = 2;
                 if (ival > limitlen) {
@@ -659,12 +634,14 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                     val = GET_24BIT_LSB_FIRST(sval);
                 else
                     val = GET_24BIT_MSB_FIRST(sval);
-                xlog_printf(xl, "%s%06X", sep, val);
+                strbuf_catf(xl->textbuf, "%s%06X", sep, val);
                 sval += 3;
                 sep = ":";
             }
-            if (*trail)
-                xlog_printf(xl, "%s%s", sep, trail);
+            if (*trail) {
+                put_datastr(xl->textbuf, sep);
+                put_datastr(xl->textbuf, trail);
+            }
             break;
           case HEXSTRING4:
           case HEXSTRING4B:
@@ -676,8 +653,8 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             sval = va_arg(ap, const char *);
 
             trail = "";
-            if (sizelimit > 0 && xl->textbuflen + 9*ival-1 > sizelimit) {
-                int limitlen = (sizelimit - xl->textbuflen + 1) / 9;
+            if (sizelimit > 0 && xl->textbuf->len + 9*ival-1 > sizelimit) {
+                int limitlen = (sizelimit - xl->textbuf->len + 1) / 9;
                 if (limitlen < 2)
                     limitlen = 2;
                 if (ival > limitlen) {
@@ -693,12 +670,14 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                     val = GET_32BIT_LSB_FIRST(sval);
                 else
                     val = GET_32BIT_MSB_FIRST(sval);
-                xlog_printf(xl, "%s%08X", sep, val);
+                strbuf_catf(xl->textbuf, "%s%08X", sep, val);
                 sval += 4;
                 sep = ":";
             }
-            if (*trail)
-                xlog_printf(xl, "%s%s", sep, trail);
+            if (*trail) {
+                put_datastr(xl->textbuf, sep);
+                put_datastr(xl->textbuf, trail);
+            }
             break;
           case SETBEGIN:
             /*
@@ -706,7 +685,7 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
              * an open brace, and then data fields will be filled in
              * later and terminated by a call to xlog_set_end().
              */
-            xlog_printf(xl, "{");
+            put_byte(xl->textbuf, '{');
             xl->reqlogstate = 3;       /* suppress comma after open brace */
             break;
           case NOTHING:
@@ -725,7 +704,7 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             ival2 &= 0xFFFF;
             if (ival2 & 0x8000)
                 ival2 -= 0x10000;
-            xlog_printf(xl, "%d/%d", ival, ival2);
+            strbuf_catf(xl->textbuf, "%d/%d", ival, ival2);
             break;
           default:
             ival = va_arg(ap, int);
@@ -739,7 +718,7 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                         break;
                     svi = va_arg(ap, int);
                     if (svi == ival) {
-                        xlog_text(xl, svname);
+                        put_datastr(xl->textbuf, svname);
                         done = true;
                         break;
                     }
@@ -750,19 +729,19 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
             }
             switch (type) {
               case DECU:
-                xlog_printf(xl, "%u", (unsigned)ival);
+                strbuf_catf(xl->textbuf, "%u", (unsigned)ival);
                 break;
               case DEC8:
                 ival &= 0xFF;
                 if (ival & 0x80)
                     ival -= 0x100;
-                xlog_printf(xl, "%d", ival);
+                strbuf_catf(xl->textbuf, "%d", ival);
                 break;
               case DEC16:
                 ival &= 0xFFFF;
                 if (ival & 0x8000)
                     ival -= 0x10000;
-                xlog_printf(xl, "%d", ival);
+                strbuf_catf(xl->textbuf, "%d", ival);
                 break;
               case DEC32:
 #if UINT_MAX > 0xFFFFFFFF
@@ -770,16 +749,16 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                 if (ival & 0x80000000)
                     ival -= 0x100000000;
 #endif
-                xlog_printf(xl, "%d", ival);
+                strbuf_catf(xl->textbuf, "%d", ival);
                 break;
               case HEX8:
-                xlog_printf(xl, "0x%02X", ival);
+                strbuf_catf(xl->textbuf, "0x%02X", ival);
                 break;
               case HEX16:
-                xlog_printf(xl, "0x%04X", ival);
+                strbuf_catf(xl->textbuf, "0x%04X", ival);
                 break;
               case HEX32:
-                xlog_printf(xl, "0x%08X", ival);
+                strbuf_catf(xl->textbuf, "0x%08X", ival);
                 break;
               case FIXED:
 #if UINT_MAX > 0xFFFFFFFF
@@ -787,54 +766,54 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                 if (ival & 0x80000000)
                     ival -= 0x100000000;
 #endif
-                xlog_printf(xl, "%.5f", ival / 65536.0);
+                strbuf_catf(xl->textbuf, "%.5f", ival / 65536.0);
                 break;
               case ENUM:
                 /* This type is used for values which are expected to
                  * _always_ take one of their special values, so we
                  * want a rendition of any non-special value which
                  * makes it clear that something isn't right. */
-                xlog_printf(xl, "Unknown%d", ival);
+                strbuf_catf(xl->textbuf, "Unknown%d", ival);
                 break;
               case BOOLEAN:
                 if (ival == 0)
-                    xlog_text(xl, "False");
+                    put_datastr(xl->textbuf, "False");
                 else if (ival == 1)
-                    xlog_text(xl, "True");
+                    put_datastr(xl->textbuf, "True");
                 else
-                    xlog_printf(xl, "BadBool%d", ival);
+                    strbuf_catf(xl->textbuf, "BadBool%d", ival);
                 break;
               case WINDOW:
-                xlog_printf(xl, "w#%08X", ival);
+                strbuf_catf(xl->textbuf, "w#%08X", ival);
                 break;
               case PIXMAP:
-                xlog_printf(xl, "p#%08X", ival);
+                strbuf_catf(xl->textbuf, "p#%08X", ival);
                 break;
               case FONT:
-                xlog_printf(xl, "f#%08X", ival);
+                strbuf_catf(xl->textbuf, "f#%08X", ival);
                 break;
               case GCONTEXT:
-                xlog_printf(xl, "g#%08X", ival);
+                strbuf_catf(xl->textbuf, "g#%08X", ival);
                 break;
               case VISUALID:
-                xlog_printf(xl, "v#%08X", ival);
+                strbuf_catf(xl->textbuf, "v#%08X", ival);
                 break;
               case PICTURE:
-                xlog_printf(xl, "pc#%08X", ival);
+                strbuf_catf(xl->textbuf, "pc#%08X", ival);
                 break;
               case PICTFORMAT:
-                xlog_printf(xl, "pf#%08X", ival);
+                strbuf_catf(xl->textbuf, "pf#%08X", ival);
                 break;
               case GLYPHSET:
-                xlog_printf(xl, "gs#%08X", ival);
+                strbuf_catf(xl->textbuf, "gs#%08X", ival);
                 break;
               case CURSOR:
                 /* Extra characters in the prefix distinguish from COLORMAP */
-                xlog_printf(xl, "cur#%08X", ival);
+                strbuf_catf(xl->textbuf, "cur#%08X", ival);
                 break;
               case COLORMAP:
                 /* Extra characters in the prefix distinguish from CURSOR */
-                xlog_printf(xl, "col#%08X", ival);
+                strbuf_catf(xl->textbuf, "col#%08X", ival);
                 break;
               case DRAWABLE:
                 /*
@@ -844,7 +823,7 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                  * determine which is which and print the
                  * _appropriate_ type prefix.
                  */
-                xlog_printf(xl, "wp#%08X", ival);
+                strbuf_catf(xl->textbuf, "wp#%08X", ival);
                 break;
               case FONTABLE:
                 /*
@@ -854,13 +833,13 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                  * determine which is which and print the
                  * _appropriate_ type prefix.
                  */
-                xlog_printf(xl, "fg#%08X", ival);
+                strbuf_catf(xl->textbuf, "fg#%08X", ival);
                 break;
               case GLYPHABLE:
                 /*
                  * GLYPHABLE can be FONTABLE or GLYPHSET. Sigh.
                  */
-                xlog_printf(xl, "gsfg#%08X", ival);
+                strbuf_catf(xl->textbuf, "gsfg#%08X", ival);
                 break;
               case EVENTMASK:
                 writemask(xl, ival,
@@ -916,11 +895,11 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
                   unsigned long lval = ival;
                   const struct atom *a = find234(xl->atoms, &lval, atomfind);
                   if (a != NULL) {
-                      xlog_text(xl, "a\"");
+                      put_datastr(xl->textbuf, "a\"");
                       print_c_string(xl, a->atomname, strlen(a->atomname));
-                      xlog_text(xl, "\"");
+                      put_datastr(xl->textbuf, "\"");
                   } else
-                      xlog_printf(xl, "a#%d", ival);
+                      strbuf_catf(xl->textbuf, "a#%d", ival);
                 }
                 break;
             }
@@ -932,7 +911,7 @@ static void xlog_param(struct xlog *xl, const char *paramname, int type, ...)
 
 static bool xlog_check_list_length(struct xlog *xl)
 {
-    if (sizelimit > 0 && xl->textbuflen > sizelimit) {
+    if (sizelimit > 0 && xl->textbuf->len > sizelimit) {
         xlog_param(xl, "...", NOTEVENEQUALSIGN);
         return true;
     }
@@ -942,26 +921,26 @@ static bool xlog_check_list_length(struct xlog *xl)
 
 static void xlog_set_end(struct xlog *xl)
 {
-    xlog_text(xl, "}");
+    put_byte(xl->textbuf, '}');
     if (xl->reqlogstate != 2)
         xl->reqlogstate = 1;
 }
 
 static void xlog_reply_begin(struct xlog *xl)
 {
-    xlog_text(xl, "{");
+    put_byte(xl->textbuf, '{');
     xl->reqlogstate = 3;
 }
 
 static void xlog_reply_end(struct xlog *xl)
 {
-    xlog_text(xl, "}");
+    put_byte(xl->textbuf, '}');
 }
 
 static void xlog_request_done(struct xlog *xl, struct request *req)
 {
     if (xl->reqlogstate)
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
 
     req->next = NULL;
     req->prev = xl->rtail;
@@ -972,7 +951,7 @@ static void xlog_request_done(struct xlog *xl, struct request *req)
     xl->rtail = req;
     req->seqnum = xl->nextseq;
     xl->nextseq = (xl->nextseq+1) & 0xFFFF;
-    req->text = dupstr(xl->textbuf);
+    req->text = dupstr(xl->textbuf->s);
 
     if (req->printed) {
         xlog_new_line(xl);
@@ -1175,7 +1154,7 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
 
     event = FETCH8(data, pos);
     if (event & 0x80) {
-        xlog_printf(xl, "SendEvent-generated ");
+        put_datastr(xl->textbuf, "SendEvent-generated ");
         event &= ~0x80;
     }
 
@@ -1194,15 +1173,17 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
         }
         if (name == NULL) {
             if (extname != NULL)
-                xlog_printf(xl, "%s:UnknownGenericEvent%d", extname, gevent);
+                strbuf_catf(xl->textbuf, "%s:UnknownGenericEvent%d",
+                            extname, gevent);
             else
-                xlog_printf(xl, "%d:UnknownGenericEvent%d", opcode, gevent);
+                strbuf_catf(xl->textbuf, "%d:UnknownGenericEvent%d",
+                            opcode, gevent);
         }
     } else if (event < 64) {
         /* Core event */
         name = xlog_translate_event(event);
         if (name == NULL)
-            xlog_printf(xl, "UnknownEvent%d");
+            strbuf_catf(xl->textbuf, "UnknownEvent%d", event);
     } else {
         /* Extension event */
         for (i = 0; event-i >= 64; i++)
@@ -1213,17 +1194,17 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
                     name = xlog_translate_event(event);
                 }
                 if (name == NULL)
-                    xlog_printf(xl, "%s:UnknownEvent%d", extname, i);
+                    strbuf_catf(xl->textbuf, "%s:UnknownEvent%d", extname, i);
                 break;
             }
         if (event-i < 64)
-            xlog_printf(xl, "UnknownEvent%d", event);
+            strbuf_catf(xl->textbuf, "UnknownEvent%d", event);
     }
 
     if (name) {
         if (filter)
             *filter = in_set(&xl->xs->events_to_log, name);
-        xlog_printf(xl, "%s", name);
+        put_datastr(xl->textbuf, name);
     } else {
         if (filter)
             *filter = in_set(&xl->xs->events_to_log, "UnknownEvent");
@@ -1232,7 +1213,7 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
       case 2: case 3: case 4: case 5: case 6: case 7: case 8:
         /* KeyPress, KeyRelease, ButtonPress, ButtonRelease, MotionNotify,
          * EnterNotify, LeaveNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "root", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+12));
         xlog_param(xl, "child", WINDOW | SPECVAL, FETCH32(data, pos+16),
@@ -1261,11 +1242,11 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
                        "Nonlinear", 3, "NonlinearVirtual", 4, (char *)NULL);
         xlog_param(xl, "state", HEX16, FETCH16(data, pos+28));
         xlog_param(xl, "time", HEX32, FETCH32(data, pos+4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 9: case 10:
         /* FocusIn, FocusOut */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "mode", ENUM | SPECVAL, FETCH8(data, pos+8),
                    "Normal", 0, "Grab", 1, "Ungrab", 2,
@@ -1274,11 +1255,11 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
                    "Ancestor", 0, "Virtual", 1, "Inferior", 2,
                    "Nonlinear", 3, "NonlinearVirtual", 4, "Pointer", 5,
                    "PointerRoot", 6, "None", 7, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 11:
         /* KeymapNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         {
             int i;
             int ppos = pos + 1;
@@ -1292,22 +1273,22 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
                     break;
             }
         }
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 12:
         /* Expose */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "x", DECU, FETCH16(data, pos+8));
         xlog_param(xl, "y", DECU, FETCH16(data, pos+10));
         xlog_param(xl, "width", DECU, FETCH16(data, pos+12));
         xlog_param(xl, "height", DECU, FETCH16(data, pos+14));
         xlog_param(xl, "count", DECU, FETCH16(data, pos+16));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 13:
         /* GraphicsExposure */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, pos+4));
         xlog_param(xl, "x", DECU, FETCH16(data, pos+8));
         xlog_param(xl, "y", DECU, FETCH16(data, pos+10));
@@ -1317,29 +1298,29 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
         xlog_param(xl, "major-opcode", DECU | SPECVAL, FETCH8(data, pos+20),
                    "CopyArea", 62, "CopyPlane", 63, (char *)NULL);
         xlog_param(xl, "minor-opcode", DECU, FETCH16(data, pos+16));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 14:
         /* NoExposure */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, pos+4));
         xlog_param(xl, "major-opcode", DECU | SPECVAL, FETCH8(data, pos+10),
                    "CopyArea", 62, "CopyPlane", 63, (char *)NULL);
         xlog_param(xl, "minor-opcode", DECU, FETCH16(data, pos+8));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 15:
         /* VisibilityNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "state", ENUM | SPECVAL, FETCH8(data, pos+8),
                    "Unobscured", 0, "PartiallyObscured", 1,
                    "FullyObscured", 2, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 16:
         /* CreateNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "x", DEC16, FETCH16(data, pos+12));
@@ -1348,52 +1329,52 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
         xlog_param(xl, "height", DECU, FETCH16(data, pos+18));
         xlog_param(xl, "border-width", DECU, FETCH16(data, pos+20));
         xlog_param(xl, "override-redirect", BOOLEAN, FETCH8(data, pos+22));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 17:
         /* DestroyNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 18:
         /* UnmapNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "from-configure", BOOLEAN, FETCH8(data, pos+12));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 19:
         /* MapNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "override-redirect", BOOLEAN, FETCH8(data, pos+12));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 20:
         /* MapRequest */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 21:
         /* ReparentNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+12));
         xlog_param(xl, "x", DEC16, FETCH16(data, pos+16));
         xlog_param(xl, "y", DEC16, FETCH16(data, pos+18));
         xlog_param(xl, "override-redirect", BOOLEAN, FETCH8(data, pos+20));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 22:
         /* ConfigureNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "x", DEC16, FETCH16(data, pos+16));
@@ -1404,11 +1385,11 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
         xlog_param(xl, "above-sibling", WINDOW | SPECVAL,
                    FETCH32(data, pos+12), "None", 0, (char *)NULL);
         xlog_param(xl, "override-redirect", BOOLEAN, FETCH8(data, pos+26));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 23:
         /* ConfigureRequest */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "x", DEC16, FETCH16(data, pos+16));
@@ -1439,64 +1420,64 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
                    "sibling", 0x0020,
                    "stack-mode", 0x0040,
                    (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 24:
         /* GravityNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "x", DEC16, FETCH16(data, pos+12));
         xlog_param(xl, "y", DEC16, FETCH16(data, pos+14));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 25:
         /* ResizeRequest */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "width", DEC16, FETCH16(data, pos+8));
         xlog_param(xl, "height", DEC16, FETCH16(data, pos+10));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 26:
         /* CirculateNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "event", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "place", ENUM | SPECVAL, FETCH8(data, pos+16),
                    "Top", 0, "Bottom", 1, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 27:
         /* CirculateRequest */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "parent", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "place", ENUM | SPECVAL, FETCH8(data, pos+16),
                    "Top", 0, "Bottom", 1, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 28:
         /* PropertyNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "atom", ATOM, FETCH32(data, pos+8));
         xlog_param(xl, "state", ENUM | SPECVAL, FETCH8(data, pos+16),
                    "NewValue", 0, "Deleted", 1, (char *)NULL);
         xlog_param(xl, "time", HEX32, FETCH32(data, pos+12));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 29:
         /* SelectionClear */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "owner", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "selection", ATOM, FETCH32(data, pos+12));
         xlog_param(xl, "time", HEX32, FETCH32(data, pos+4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 30:
         /* SelectionRequest */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "owner", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "selection", ATOM, FETCH32(data, pos+16));
         xlog_param(xl, "target", ATOM, FETCH32(data, pos+20));
@@ -1505,11 +1486,11 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
         xlog_param(xl, "requestor", WINDOW, FETCH32(data, pos+12));
         xlog_param(xl, "time", HEX32 | SPECVAL, FETCH32(data, pos+4),
                    "CurrentTime", 0, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 31:
         /* SelectionNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "requestor", WINDOW, FETCH32(data, pos+8));
         xlog_param(xl, "selection", ATOM, FETCH32(data, pos+12));
         xlog_param(xl, "target", ATOM, FETCH32(data, pos+16));
@@ -1517,22 +1498,22 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
                    "None", 0, (char *)NULL);
         xlog_param(xl, "time", HEX32 | SPECVAL, FETCH32(data, pos+4),
                    "CurrentTime", 0, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 32:
         /* ColormapNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "colormap", COLORMAP | SPECVAL, FETCH32(data, pos+8),
                    "None", 0, (char *)NULL);
         xlog_param(xl, "new", BOOLEAN, FETCH8(data, pos+12));
         xlog_param(xl, "state", ENUM | SPECVAL, FETCH8(data, pos+13),
                    "Uninstalled", 0, "Installed", 1, (char *)NULL);
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 33:
         /* ClientMessage */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "window", WINDOW, FETCH32(data, pos+4));
         xlog_param(xl, "type", ATOM, FETCH32(data, pos+8));
         xlog_param(xl, "format", DECU, FETCH8(data, pos+1));
@@ -1593,29 +1574,29 @@ static void xlog_event(struct xlog *xl, const unsigned char *data,
             }
             break;
           default:
-            xlog_printf(xl, "<unknown format of data>");
+            put_datastr(xl->textbuf, "<unknown format of data>");
             break;
         }
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 34:
         /* MappingNotify */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "request", ENUM | SPECVAL, FETCH8(data, pos+4),
                    "Modifier", 0, "Keyboard", 1, "Pointer", 2, (char *)NULL);
         xlog_param(xl, "first-keycode", DECU, FETCH8(data, pos+5));
         xlog_param(xl, "count", DECU, FETCH8(data, pos+6));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case EXT_MITSHM | 0:
         /* ShmCompletion */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, pos+4));
         xlog_param(xl, "shmseg", HEX32, FETCH32(data, pos+8));
         xlog_param(xl, "minor-event", DECU, FETCH16(data, pos+12));
         xlog_param(xl, "major-event", DECU, FETCH8(data, pos+14));
         xlog_param(xl, "offset", HEX32, FETCH32(data, pos+16));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       default:
         /* unknown event */
@@ -1708,7 +1689,7 @@ static void xlog_do_request(struct xlog *xl, const void *vdata, int len)
     const unsigned char *data = (const unsigned char *)vdata;
     struct request *req;
 
-    xl->textbuflen = 0;
+    strbuf_clear(xl->textbuf);
     xl->overflow = false;
 
     req = snew(struct request);
@@ -2013,7 +1994,7 @@ static void xlog_do_request(struct xlog *xl, const void *vdata, int len)
                        STRING(data, 24, 4*FETCH32(data, 20)));
             break;
           default:
-            xlog_printf(xl, "<unknown format of data>");
+            put_datastr(xl->textbuf, "<unknown format of data>");
             break;
         }
         break;
@@ -4426,7 +4407,7 @@ static void xlog_do_reply(struct xlog *xl, struct request *req,
         return;
     }
 
-    xl->textbuflen = 0;
+    strbuf_clear(xl->textbuf);
     xl->overflow = false;
 
     xlog_respond_to(xl, req);
@@ -4447,7 +4428,7 @@ static void xlog_do_reply(struct xlog *xl, struct request *req,
          * something odd happened.
          */
         if (req->replies != 3)
-            xlog_printf(xl, "<no reply received?!>");
+            put_datastr(xl->textbuf, "<no reply received?!>");
         req->replies = 1;              /* force discard */
     } else switch (req->opcode) {
       case 3:
@@ -4571,7 +4552,7 @@ static void xlog_do_reply(struct xlog *xl, struct request *req,
                            STRING(data, 32, 4*FETCH32(data, 16)));
                 break;
               default:
-                xlog_printf(xl, "<unknown format of data>");
+                put_datastr(xl->textbuf, "<unknown format of data>");
                 break;
             }
         }
@@ -5342,13 +5323,13 @@ static void xlog_do_reply(struct xlog *xl, struct request *req,
         break;
 
       default:
-        xlog_printf(xl, "<unable to decode reply data>");
+        put_datastr(xl->textbuf, "<unable to decode reply data>");
         break;
     }
 
-    if (xl->textbuflen) {
+    if (xl->textbuf->len > 0) {
         xlog_reply_end(xl);
-        xlog_response_done(xl->xs, req, xl->textbuf);
+        xlog_response_done(xl->xs, req, xl->textbuf->s);
     }
 
     if (req->replies == 1)
@@ -5416,7 +5397,7 @@ static void xlog_do_error(struct xlog *xl, struct request *req,
     int errcode, i;
     const char *error;
 
-    xl->textbuflen = 0;
+    strbuf_clear(xl->textbuf);
     xl->overflow = false;
 
     xlog_respond_to(xl, req);
@@ -5429,7 +5410,7 @@ static void xlog_do_error(struct xlog *xl, struct request *req,
         /* Core error */
         error = xlog_translate_error(errcode);
         if (error == NULL)
-            xlog_printf(xl, "UnknownError%d");
+            strbuf_catf(xl->textbuf, "UnknownError%d", errcode);
     } else {
         /* Extension error */
         for (i = 0; errcode-i >= 128; i++)
@@ -5440,14 +5421,14 @@ static void xlog_do_error(struct xlog *xl, struct request *req,
                     error = xlog_translate_error(errcode);
                 }
                 if (error == NULL)
-                    xlog_printf(xl, "%s:UnknownError%d", extname, i);
+                    strbuf_catf(xl->textbuf, "%s:UnknownError%d", extname, i);
                 break;
             }
         if (errcode-i < 128)
-            xlog_printf(xl, "UnknownError%d", errcode);
+            strbuf_catf(xl->textbuf, "UnknownError%d", errcode);
     }
     if (error)
-        xlog_printf(xl, "%s", error);
+        put_datastr(xl->textbuf, error);
 
     switch (errcode) {
       case 1:
@@ -5455,54 +5436,54 @@ static void xlog_do_error(struct xlog *xl, struct request *req,
         break;
       case 2:
         /* BadValue */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xlog_param(xl, "value", HEX32, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 3:
         /* BadWindow */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "window", WINDOW, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 4:
         /* BadPixmap */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "pixmap", PIXMAP, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 5:
         /* BadAtom */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "atom", ATOM, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 6:
         /* BadCursor */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "cursor", CURSOR, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 7:
         /* BadFont */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "font", FONT, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 8:
         /* BadMatch */
         break;
       case 9:
         /* BadDrawable */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "drawable", DRAWABLE, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 10:
         /* BadAccess */
@@ -5512,24 +5493,24 @@ static void xlog_do_error(struct xlog *xl, struct request *req,
         break;
       case 12:
         /* BadColormap */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "colormap", COLORMAP, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 13:
         /* BadGContext */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "gc", GCONTEXT, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 14:
         /* BadIDChoice */
-        xlog_printf(xl, "(");
+        put_byte(xl->textbuf, '(');
         xl->reqlogstate = 3;
         xlog_param(xl, "id", HEX32, FETCH32(data, 4));
-        xlog_printf(xl, ")");
+        put_byte(xl->textbuf, ')');
         break;
       case 15:
         /* BadName */
@@ -5545,7 +5526,7 @@ static void xlog_do_error(struct xlog *xl, struct request *req,
         break;
     }
 
-    xlog_response_done(xl->xs, req, xl->textbuf);
+    xlog_response_done(xl->xs, req, xl->textbuf->s);
 
     /*
      * Don't expect any further response to this request.
@@ -5559,14 +5540,14 @@ static void xlog_do_event(struct xlog *xl, const void *vdata, int len)
     const unsigned char *data = (const unsigned char *)vdata;
     int filter;
 
-    xl->textbuflen = 0;
+    strbuf_clear(xl->textbuf);
     xl->overflow = false;
 
     xlog_event(xl, data, len, 0, &filter);
 
     if (filter) {
         xlog_new_line(xl);
-        fprintf(xl->xs->outfp, "--- %s\n", xl->textbuf);
+        fprintf(xl->xs->outfp, "--- %s\n", xl->textbuf->s);
         fflush(xl->xs->outfp);
     }
 }
@@ -5775,8 +5756,8 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
                 const unsigned char *data = xl->s2cbuf;
                 int len = xl->s2clen;
 
-                xl->textbuflen = 0;
-                xlog_printf(xl, "--- server init message: ");
+                strbuf_clear(xl->textbuf);
+                put_datastr(xl->textbuf, "--- server init message: ");
                 xl->reqlogstate = 3;
 
                 xlog_param(xl, "protocol-major-version", DECU,
@@ -5916,7 +5897,7 @@ void xlog_s2c(struct xlog *xl, const void *vdata, int len)
                 }
 
                 xlog_new_line(xl);
-                fprintf(xl->xs->outfp, "%s\n", xl->textbuf);
+                fprintf(xl->xs->outfp, "%s\n", xl->textbuf->s);
             }
 
             /*
