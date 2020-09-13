@@ -1,11 +1,12 @@
-/*.d
-/*.o
+*.d
+*.o
 /xtruss
 /xtruss.1
 /Makefile.local
 /build.log
 /build.out
-/.deps
+.deps
+.dirstamp
 /Makefile
 /Makefile.in
 /aclocal.m4

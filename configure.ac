@@ -1,7 +1,7 @@
 # autoconf input for xtruss. -*- sh -*-
 
 AC_INIT([xtruss], [6.66], [anakin@pobox.com])
-AC_CONFIG_SRCDIR([uxxtruss.c])
+AC_CONFIG_SRCDIR([xtruss.c])
 
 AM_INIT_AUTOMAKE([foreign])
 

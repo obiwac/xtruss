@@ -1,8 +1,10 @@
-xtruss is copyright 1997-2009 Simon Tatham.
+xtruss is copyright 1997-2020 Simon Tatham.
 
 Portions copyright Robert de Bath, Andreas Schultz, Jeroen Massar,
 Nicolas Barry, Justin Bradford, Ben Harris, Malcolm Smith, Ahmad
-Khalifa, Colin Watson, and the X Consortium.
+Khalifa, Colin Watson, Lorenz Diener, Christian Brabandt, Jeff Smith,
+Pavel Kryukov, Maxim Kuznetsov, Svyatoslav Kuzmich, and the X
+Consortium.
 
 Permission is hereby granted, free of charge, to any person
 obtaining a copy of this software and associated documentation files
