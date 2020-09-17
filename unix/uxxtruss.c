@@ -24,8 +24,23 @@ const bool buildinfo_gtk_relevant = false;
 static int signalpipe[2] = { -1, -1 };
 static void sigchld(int signum)
 {
-    if (write(signalpipe[1], "x", 1) <= 0)
-        /* not much we can do about it */;
+    if (write(signalpipe[1], "x", 1) <= 0) {
+        /*
+         * If this fails with EAGAIN, it's because the pipe buffer is
+         * full, in which case we can ignore the error because we know
+         * the main loop is already going to be called back after this
+         * signal.
+         *
+         * If it fails for any other reason, that's probably because
+         * the pipe doesn't even exist, in which case the main program
+         * isn't interested in receiving these notifications anyway,
+         * so we might as well do nothing.
+         *
+         * (In other words, the only reason I'm checking the return
+         * status of write() after all is that modern compilers
+         * complain if you don't.)
+         */
+    }
 }
 
 void xtruss_start_subprocess(xtruss_state *xs)
@@ -58,6 +73,11 @@ static void xtruss_pw_check(void *ctx, pollwrapper *pw)
 
     if (signalpipe[0] >= 0 &&
         pollwrap_check_fd_rwx(pw, signalpipe[0], SELECT_R)) {
+
+        /* Empty the pipe */
+        char buf[256];
+        while (read(signalpipe[0], buf, sizeof(buf)) > 0);
+
         int retd, status;
         while ((retd = waitpid(-1, &status, WNOHANG)) > 0) {
             if (xs->platform->childpid >= 0 &&
@@ -96,6 +116,8 @@ int main(int argc, char **argv)
         perror("pipe");
         exit(1);
     }
+    nonblock(signalpipe[0]);
+    nonblock(signalpipe[1]);
     putty_signal(SIGCHLD, sigchld);
 
     sk_init();
