@@ -12,10 +12,17 @@ struct winq {
     struct winq *next;
 };
 
+struct atom_list {
+    unsigned long atomval;
+    char *atomname;
+    struct atom_list *next;
+};
+
 struct xrecord_state {
     struct xtruss_state *xs;
     char *welcome_message;
     size_t welcome_message_len;
+    struct atom_list *atoms;
 
     int crState;
 
@@ -239,6 +246,40 @@ static void xrecord_coroutine(struct xrecord_state *xr,
     if (xr->buf->u[0] == 1)
         crReadUpTo(xr->buf, 32  + 4*GET_32BIT_MSB_FIRST(xr->buf->u+4));
     EXPECT_REPLY("RecordQueryVersion");
+
+    /*
+     * Query currently defined atoms
+     */
+#define MAX_PREDEFINED_ATOM_ID 68
+#define MAX_ATOM_ID 0x1FFFFFFF
+#define NEXT_ATOM_ID (xr->atoms ? xr->atoms->atomval + 1 : MAX_PREDEFINED_ATOM_ID + 1)
+
+    if (!xr->xs->xrskipatoms) {
+        while (NEXT_ATOM_ID <= MAX_ATOM_ID) {
+            buf[0] = 17;
+            buf[1] = 0; /* GetAtomName opcode and padding */
+            PUT_16BIT_MSB_FIRST(buf + 2, 2);           /* request length */
+            PUT_32BIT_MSB_FIRST(buf + 4, NEXT_ATOM_ID);       /* atom id */
+            sk_write(xr->sock, buf, 8);
+
+            strbuf_clear(xr->buf);
+            crReadUpTo(xr->buf, 32);
+            if (xr->buf->u[0] != 1) {
+                break;
+            }
+            crReadUpTo(xr->buf, 32 + 4 * GET_32BIT_MSB_FIRST(xr->buf->u + 4));
+            {
+                struct atom_list *al = snew(struct atom_list);
+                unsigned atom_length = GET_16BIT_MSB_FIRST(xr->buf->u + 8);
+                al->atomname = snewn(atom_length + 1, char);
+                memcpy(al->atomname, xr->buf->u + 32, atom_length);
+                al->atomname[atom_length] = 0;
+                al->atomval = NEXT_ATOM_ID;
+                al->next = xr->atoms;
+                xr->atoms = al;
+            }
+        }
+    }
 
     if (xr->xs->xrselectclient) {
         fprintf(stderr, "xtruss: click mouse in a window belonging to the "
@@ -543,12 +584,17 @@ static void xrecord_coroutine(struct xrecord_state *xr,
         our_id = GET_32BIT_MSB_FIRST(xr->buf->u+12);
         our_xl = find234(xr->xlogs_by_id, &our_id, xlog_find_id);
         if (!our_xl) {
+            struct atom_list *al = xr->atoms;
             our_xl = xlog_new(xr->xs, XLOG_BARE);
             xlog_set_clientid(our_xl, our_id);
             struct xlog *added = add234(xr->xlogs_by_id, our_xl);
             assert(added == our_xl);
             xlog_use_welcome_message(our_xl, xr->welcome_message,
                                      xr->welcome_message_len);
+            while (al) {
+                xlog_intern_atom(our_xl, al->atomname, al->atomval);
+                al = al->next;
+            }
         }
 
         switch (xr->buf->u[1]) {

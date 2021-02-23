@@ -6016,3 +6016,8 @@ void xlog_set_next_seq(struct xlog *xl, int seq)
 {
     xl->nextseq = seq;
 }
+
+void xlog_intern_atom(struct xlog *xl, char *name, unsigned long val)
+{
+    internatom(xl->atoms, dupstr(name), val);
+}

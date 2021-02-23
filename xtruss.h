@@ -19,7 +19,7 @@ struct xtruss_state {
     char **subcommand;
     const char *env_disp, *env_auth;
 
-    bool xrecord, xrselectclient, xrexit;
+    bool xrecord, xrselectclient, xrskipatoms, xrexit;
     unsigned xrclientid;
 
     FILE *outfp;
@@ -63,6 +63,7 @@ unsigned xlog_get_clientid(struct xlog *xl);
 void xlog_set_endianness(struct xlog *xl, char endian);
 void xlog_set_next_seq(struct xlog *xl, int seq);
 void xlog_use_welcome_message(struct xlog *xl, const void *vdata, int len);
+void xlog_intern_atom(struct xlog *xl, char *name, unsigned long val);
 
 const char *xlog_translate_error(int errcode);
 const char *xlog_translate_event(int eventtype);

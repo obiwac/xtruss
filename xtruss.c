@@ -165,6 +165,7 @@ const char usagemsg[] =
 "         -I                      log X server initialisation message\n"
 "         -R                      also give raw hex dump of session traffic\n"
 "         -C                      unconditionally prefix client id to every line\n"
+"         -A                      do not load existing atoms on startup in -p mode\n"
 "         -display <display>      specify X display (overrides $DISPLAY)\n"
 "   also: xtruss --version        report version number\n"
 "         xtruss --help           display this help text\n"
@@ -487,6 +488,9 @@ void xtruss_cmdline(xtruss_state *xs, int argc, char **argv)
                     break;
                   case 'P':
                     xs->proxy_only = true;
+                    break;
+                  case 'A':
+                    xs->xrskipatoms = true;
                     break;
                 }
             }
