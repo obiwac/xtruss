@@ -175,6 +175,10 @@ void xtruss_proxy_start(xtruss_state *xs)
         make_ptrlen(xs->x11disp->localauthdata,
                     xs->x11disp->localauthdatalen),
         xp->sockets, xs->conf);
+    if (xp->nsockets == 0) {
+        fprintf(stderr, "xtruss: unable to create proxy X display\n");
+        exit(1);
+    }
 
     xs->env_disp = conf_get_str_str(xs->conf, CONF_environmt, "DISPLAY");
     xs->env_auth = conf_get_str_str(xs->conf, CONF_environmt, "XAUTHORITY");
