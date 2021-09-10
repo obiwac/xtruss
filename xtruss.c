@@ -145,6 +145,7 @@
 #include "ssh.h"
 #include "storage.h"
 #include "xtruss.h"
+#include "version.h"
 
 void read_random_seed(noise_consumer_t consumer) {}
 void write_random_seed(void *data, int len) {}
@@ -215,9 +216,8 @@ void licence(void) {
 void version(void) {
 #ifdef PACKAGE_VERSION
     printf("xtruss, version %s\n", PACKAGE_VERSION);
-#else
-    printf("xtruss: version number unavailable when not built via automake\n");
 #endif
+    printf("Source commit: %s\n", commitid);
 }
 
 const char *const appname = "xtruss";

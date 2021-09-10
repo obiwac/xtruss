@@ -122,7 +122,6 @@ int main(int argc, char **argv)
 
     sk_init();
     uxsel_init();
-    random_ref();
 
     xtruss_start(xs);
 

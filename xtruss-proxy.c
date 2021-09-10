@@ -4,7 +4,7 @@
 #include "putty.h"
 #include "network.h"
 #include "ssh.h"
-#include "sshserver.h"                 /* for MAX_X11_SOCKETS */
+#include "ssh/server.h"                 /* for MAX_X11_SOCKETS */
 #include "xtruss.h"
 
 struct xtruss_proxy {

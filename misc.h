@@ -374,6 +374,22 @@ static inline void PUT_16BIT_MSB_FIRST(void *vp, uint16_t value)
     p[0] = (uint8_t)(value >> 8);
 }
 
+/* For use in X11-related applications, an endianness-variable form of
+ * {GET,PUT}_16BIT which expects 'endian' to be either 'B' or 'l' */
+
+static inline uint16_t GET_16BIT_X11(char endian, const void *p)
+{
+    return endian == 'B' ? GET_16BIT_MSB_FIRST(p) : GET_16BIT_LSB_FIRST(p);
+}
+
+static inline void PUT_16BIT_X11(char endian, void *p, uint16_t value)
+{
+    if (endian == 'B')
+        PUT_16BIT_MSB_FIRST(p, value);
+    else
+        PUT_16BIT_LSB_FIRST(p, value);
+}
+
 /* Replace NULL with the empty string, permitting an idiom in which we
  * get a string (pointer,length) pair that might be NULL,0 and can
  * then safely say things like printf("%.*s", length, NULLTOEMPTY(ptr)) */
@@ -429,5 +445,14 @@ LoadFileStatus lf_load_fp(LoadedFile *lf, FILE *fp);
 LoadFileStatus lf_load(LoadedFile *lf, const Filename *filename);
 static inline ptrlen ptrlen_from_lf(LoadedFile *lf)
 { return make_ptrlen(lf->data, lf->len); }
+
+/* Set the memory block of 'size' bytes at 'out' to the bitwise XOR of
+ * the two blocks of the same size at 'in1' and 'in2'.
+ *
+ * 'out' may point to exactly the same address as one of the inputs,
+ * but if the input and output blocks overlap in any other way, the
+ * result of this function is not guaranteed. No memmove-style effort
+ * is made to handle difficult overlap cases. */
+void memxor(uint8_t *out, const uint8_t *in1, const uint8_t *in2, size_t size);
 
 #endif

@@ -1,11 +1,29 @@
-README for the xtruss source code
----------------------------------
+README for xtruss
+-----------------
 
-This is a rather disorganised source code directory, for which I can
-only apologise and plead that the program was thrown together in a
-hurry.
+This is the README for xtruss, an X11 protocol tracer.
 
-Almost all the source files in here are lifted almost without change
+xtruss is built using CMake <https://cmake.org/>. To compile in the
+simplest way, run these commands in the source directory:
+
+  cmake .
+  cmake --build .
+
+The 'man' page is built using Halibut, from source in the `doc'
+subdirectory. If you aren't using one of our source snapshots, you'll
+need to do this yourself. Halibut can be found at
+<https://www.chiark.greenend.org.uk/~sgtatham/halibut/>.
+
+The xtruss home web site is
+
+    https://www.chiark.greenend.org.uk/~sgtatham/xtruss/
+
+See the file LICENCE for the licence conditions.
+
+Source code organisation
+------------------------
+
+Most source files in this project are lifted almost without change
 from the PuTTY source tree, because that already contained nearly
 all the code necessary to handle proxying of an X11 server, checking
 the authorisation in the incoming connections, and substituting the
@@ -15,17 +33,20 @@ that talk to a local listening socket in place of incoming X
 forwarding channels of an SSH connection, and I had a ready-made X
 proxy to which all I had to do was add (a lot of) logging code.
 
-Little editing has been done to the files taken from PuTTY - a
-couple of necessary features added, but that's about it - as a
-result of which there are still huge amounts of PuTTY-like code in
-this directory that are unused by and irrelevant to xtruss, such as
-nearly all of the Config structure in putty.h, and a lot of the rest
-of putty.h (such as definitions of functions and global variables in
-source files that don't exist).
+The files taken from PuTTY are edited as little as possible, to reduce
+merge conflicts when bringing in further updates from later versions
+of PuTTY: files are completely unmodified whenever possible, and
+failing that, modified in a very minimal way, ideally by just
+inserting '#if 0' to remove parts of a file which xtruss doesn't use
+and which would otherwise be difficult to get to compile.
 
-The xtruss-specific code is in the single enormous file uxxtruss.c,
-which includes both the X11 protocol decoder, the main program and
-command-line processing, and the Unix-specific front end code that
-manipulates the environment, forks off subprocesses, creates files
-in /tmp and loops round on select() to handle multiple network
-connections.
+So you'll often find comments in the PuTTY-derived parts of the code
+that refer to functions, variables and entire files that are not
+actually here. This is a deliberate tradeoff to keep maintenance easy.
+If you're interested in seeing what all those things really are, you
+can find them in the PuTTY code base (perhaps by rewinding to the most
+recent PuTTY commit id cited in the xtruss git history).
+
+The xtruss-specific code lives in source files with 'xtruss' in the
+name: xtruss*.c and xtruss*.h in the top-level directory, and
+unix/uxxtruss.c for the Unix-specific part.
