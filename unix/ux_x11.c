@@ -88,7 +88,7 @@ int platform_make_x11_server(Plug *plug, const char *progname, int mindisp,
             sk_close(sockets[nsockets]);
         }
 
-        if (!strcmp(err, strerror(EADDRINUSE))) /* yuck! */
+        if (strcmp(err, strerror(EADDRINUSE))) /* yuck! */
             goto out;
     }
 
