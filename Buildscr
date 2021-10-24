@@ -7,7 +7,7 @@ module xtruss
 set Version $(!builddate).$(vcsid)
 
 # use perl to avoid inconsistent behaviour of echo '\v'
-in xtruss do perl -e 'print "\n\\versionid xtruss version $$ARGV[0]\n"' $(Version) >> xtruss.but
+in xtruss do perl -e 'print "\n\\versionid xtruss version $$ARGV[0]\n"' $(Version) >> doc/man-xtruss.but
 in xtruss do perl -e 'print "$#define PACKAGE_VERSION \"$$ARGV[0]\"\n"' $(Version) > version.h
 
 # In cmake/gitcommit.cmake, replace the default output "unavailable"
@@ -30,7 +30,7 @@ in build-test do make -j$(nproc)
 in . do cp -R xtruss xtruss-$(Version)
 in . do tar chzvf xtruss-$(Version).tar.gz xtruss-$(Version)
 
-in xtruss do halibut --html=manpage.html xtruss.but
+in xtruss/doc do halibut --html=manpage.html man-xtruss.but
 
 deliver xtruss-$(Version).tar.gz $@
-deliver xtruss/manpage.html $@
+deliver xtruss/doc/manpage.html $@
