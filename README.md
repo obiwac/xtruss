@@ -19,7 +19,7 @@ Run:
 % mkdir build
 % cd build
 % cmake ..
-% make
+% make -j<however many threads you have>
 ```
 
 Your `xtruss` executable will be at `build/xtruss`.

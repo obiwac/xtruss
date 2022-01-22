@@ -55,3 +55,4 @@ Makefile
 /unix/stamp-h1
 /unix/*.log
 /unix/.deps
+build/
