@@ -1,7 +1,7 @@
 task:
   name: AMD64 Linux build
   container:
-    image: gcc:latest
+    image: kitware/cmake:latest
   build_script:
     - mkdir build
     - cd build
@@ -13,7 +13,7 @@ task:
 task:
   name: ARM64 Linux build
   arm_container:
-    image: gcc:latest
+    image: kitware/cmake:latest
   build_script:
     - mkdir build
     - cd build
