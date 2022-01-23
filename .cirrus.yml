@@ -3,6 +3,7 @@ task:
   container:
     image: gcc:latest
   setup_script:
+    - apt update
     - apt install -y cmake
   build_script:
     - mkdir build
@@ -17,6 +18,7 @@ task:
   arm_container:
     image: gcc:latest
   setup_script:
+    - apt update
     - apt install -y cmake
   build_script:
     - mkdir build
