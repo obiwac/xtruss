@@ -1,0 +1,23 @@
+task:
+  name: AMD64 Linux build
+  container:
+    image: gcc:latest
+  build_script:
+    - mkdir build
+    - cd build
+    - cmake ..
+    - make -j$(nproc -all)
+  amd64_artifacts:
+    path: "build/xtruss"
+
+task:
+  name: ARM64 Linux build
+  arm_container:
+    image: gcc:latest
+  build_script:
+    - mkdir build
+    - cd build
+    - cmake ..
+    - make -j$(nproc -all)
+  arm64_artifacts:
+    path: "build/xtruss"
