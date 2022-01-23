@@ -1,7 +1,7 @@
 task:
   name: AMD64 Linux build
   container:
-    image: kitware/cmake:latest
+    image: kitware/cmake:ci-debian10-x86_64-2021-11-18
   build_script:
     - mkdir build
     - cd build
@@ -13,7 +13,7 @@ task:
 task:
   name: ARM64 Linux build
   arm_container:
-    image: kitware/cmake:latest
+    image: kitware/cmake:ci-debian10-aarch64-2021-11-18
   build_script:
     - mkdir build
     - cd build
